@@ -56,10 +56,6 @@ func (d *DigitalOcean) Configure(ctx context.Context, tag string, node yaml.Node
 	return nil
 }
 
-func (d *DigitalOcean) Provision(_ context.Context, _ provider.Spec) (provider.Instance, error) {
-	return provider.Instance{}, errors.New("digitalocean: not implemented")
-}
-
 func (d *DigitalOcean) Destroy(_ context.Context, _ string) error {
 	return errors.New("digitalocean: not implemented")
 }
