@@ -19,3 +19,18 @@ provider_config:
 
 DigitalOcean is treated as per-second billed; use low `poll.idle_timeout` for
 one-job-per-Droplet behavior.
+
+## Token scope
+
+The DigitalOcean token needs read/write access for Droplets, SSH keys, tags, and
+firewalls.
+
+## Billing
+
+DigitalOcean Droplets are treated as per-second billed. Use a low
+`poll.idle_timeout`, for example `1s`, if every job should get a fresh Droplet.
+
+## Managed firewall
+
+The managed firewall allows inbound tcp/22 from `allow_inbound` and permits all
+outbound traffic. `auto` resolves the orchestrator host's public IPs at startup.

@@ -34,6 +34,7 @@ import (
 	// Register in-tree providers.
 	dockerprov "github.com/hstern/fj-bellows/internal/provider/docker"
 	linodeprov "github.com/hstern/fj-bellows/internal/provider/linode"
+	_ "github.com/hstern/fj-bellows/internal/provider/digitalocean"
 )
 
 func main() {
