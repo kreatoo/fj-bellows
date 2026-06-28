@@ -44,6 +44,9 @@ func (d *DigitalOcean) ensureFirewall(ctx context.Context) error {
 			return d.updateFirewall(ctx)
 		}
 	}
+	if err := d.client.CreateTag(ctx, d.tag); err != nil {
+		return fmt.Errorf("digitalocean: create tag: %w", err)
+	}
 	fw, err := d.client.CreateFirewall(ctx, d.firewallRequest())
 	if err != nil {
 		return fmt.Errorf("digitalocean: create firewall: %w", err)
