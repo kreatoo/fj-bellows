@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/digitalocean/godo"
 	"golang.org/x/oauth2"
@@ -16,17 +17,21 @@ import (
 )
 
 type DigitalOcean struct {
-	cfg       config
-	tag       string
-	client    doClient
-	newClient func(token string) doClient
+	cfg                  config
+	tag                  string
+	client               doClient
+	newClient            func(token string) doClient
+	firewallID           string
+	pollInterval         time.Duration
+	resolvedAllowInbound []string
+	resolveAuto          func(context.Context) ([]string, error)
 }
 
 func init() {
 	provider.Register("digitalocean", func() provider.Provider { return &DigitalOcean{} })
 }
 
-func (d *DigitalOcean) Configure(_ context.Context, tag string, node yaml.Node) error {
+func (d *DigitalOcean) Configure(ctx context.Context, tag string, node yaml.Node) error {
 	var cfg config
 	if err := node.Decode(&cfg); err != nil {
 		return fmt.Errorf("digitalocean: decode provider_config: %w", err)
@@ -40,7 +45,14 @@ func (d *DigitalOcean) Configure(_ context.Context, tag string, node yaml.Node) 
 	if d.newClient == nil {
 		d.newClient = newGodoClient
 	}
+	if d.resolveAuto == nil {
+		d.resolveAuto = defaultResolveAuto
+	}
 	d.client = d.newClient(cfg.Token)
+	if err := d.ensureFirewall(ctx); err != nil {
+		return err
+	}
+	d.pollInterval = 2 * time.Second
 	return nil
 }
 
