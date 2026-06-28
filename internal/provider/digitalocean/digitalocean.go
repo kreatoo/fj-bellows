@@ -5,7 +5,6 @@ package digitalocean
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"time"
 
@@ -54,14 +53,6 @@ func (d *DigitalOcean) Configure(ctx context.Context, tag string, node yaml.Node
 	}
 	d.pollInterval = 2 * time.Second
 	return nil
-}
-
-func (d *DigitalOcean) Destroy(_ context.Context, _ string) error {
-	return errors.New("digitalocean: not implemented")
-}
-
-func (d *DigitalOcean) List(_ context.Context, _ string) ([]provider.Instance, error) {
-	return nil, errors.New("digitalocean: not implemented")
 }
 
 func (d *DigitalOcean) BillingModel() provider.BillingModel {
