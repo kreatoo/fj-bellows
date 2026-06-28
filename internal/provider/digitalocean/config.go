@@ -37,11 +37,13 @@ func (c config) validate() error {
 	if c.Region == "" {
 		return errors.New("digitalocean: provider_config missing: region")
 	}
-	if c.Size == "" {
-		return errors.New("digitalocean: provider_config missing: size")
-	}
-	if c.Image == "" {
-		return errors.New("digitalocean: provider_config missing: image")
+	if len(c.Labels) == 0 {
+		if c.Size == "" {
+			return errors.New("digitalocean: provider_config missing: size (or use labels map)")
+		}
+		if c.Image == "" {
+			return errors.New("digitalocean: provider_config missing: image (or use labels map)")
+		}
 	}
 	if len(c.Firewall.AllowInbound) == 0 {
 		return errors.New("digitalocean: provider_config missing: firewall.allow_inbound")
