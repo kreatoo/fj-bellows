@@ -92,14 +92,17 @@ type SSH struct {
 }
 
 // Load reads, parses, defaults, and validates a config file.
+// Environment variable references of the form ${VAR} or $VAR are expanded
+// after the file is read but before YAML parsing.
 func Load(path string) (*Config, error) {
 	//nolint:gosec // G304: path is the operator-supplied config file, not user input.
 	b, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read config: %w", err)
 	}
+	expanded := os.ExpandEnv(string(b))
 	var c Config
-	if err := yaml.Unmarshal(b, &c); err != nil {
+	if err := yaml.Unmarshal([]byte(expanded), &c); err != nil {
 		return nil, fmt.Errorf("parse config: %w", err)
 	}
 	c.applyDefaults()

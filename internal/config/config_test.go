@@ -139,6 +139,34 @@ provider: linode
 	}
 }
 
+func TestLoadExpandEnv(t *testing.T) {
+	t.Setenv("TEST_FORGEJO_TOKEN", "expanded-token")
+	t.Setenv("TEST_TAG", "staging")
+	path := writeTemp(t, "config.yaml", `
+forgejo:
+  url: https://forgejo.example.com
+  token: ${TEST_FORGEJO_TOKEN}
+  scope: orgs/example
+  labels: [ubuntu-latest]
+provider: linode
+tag: ${TEST_TAG}
+ssh:
+  private_key_file: /tmp/id
+provider_config:
+  region: us-ord
+`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Forgejo.Token != "expanded-token" {
+		t.Fatalf("Forgejo.Token = %q, want %q", cfg.Forgejo.Token, "expanded-token")
+	}
+	if cfg.Tag != "staging" {
+		t.Fatalf("Tag = %q, want %q", cfg.Tag, "staging")
+	}
+}
+
 func TestLoadBadDuration(t *testing.T) {
 	path := writeTemp(t, "config.yaml", `
 forgejo: {url: u, token: t, scope: s}
