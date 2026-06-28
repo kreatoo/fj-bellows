@@ -2,6 +2,7 @@ package digitalocean
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -45,7 +46,12 @@ func (d *DigitalOcean) ensureFirewall(ctx context.Context) error {
 		}
 	}
 	if err := d.client.CreateTag(ctx, d.tag); err != nil {
-		return fmt.Errorf("digitalocean: create tag: %w", err)
+		var errResp *godo.ErrorResponse
+		if errors.As(err, &errResp) && errResp.Response.StatusCode == http.StatusConflict {
+			// Tag already exists — that's fine.
+		} else {
+			return fmt.Errorf("digitalocean: create tag: %w", err)
+		}
 	}
 	fw, err := d.client.CreateFirewall(ctx, d.firewallRequest())
 	if err != nil {
