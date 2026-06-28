@@ -6,11 +6,17 @@ import (
 )
 
 type config struct {
-	Token    string         `yaml:"token"`
-	Region   string         `yaml:"region"`
-	Size     string         `yaml:"size"`
-	Image    string         `yaml:"image"`
-	Firewall firewallConfig `yaml:"firewall"`
+	Token    string                `yaml:"token"`
+	Region   string                `yaml:"region"`
+	Size     string                `yaml:"size"`
+	Image    string                `yaml:"image"`
+	Firewall firewallConfig        `yaml:"firewall"`
+	Labels   map[string]labelConfig `yaml:"labels"`
+}
+
+type labelConfig struct {
+	Image string `yaml:"image"`
+	Size  string `yaml:"size"`
 }
 
 type firewallConfig struct {

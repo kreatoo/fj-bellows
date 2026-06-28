@@ -20,12 +20,13 @@ func (d *DigitalOcean) Provision(ctx context.Context, spec provider.Spec) (provi
 	if err := d.ensureFirewall(ctx); err != nil {
 		return provider.Instance{}, err
 	}
+	size, image := d.resolveImageSize(spec.Tag)
 	droplet, err := d.client.CreateDroplet(ctx, &godo.DropletCreateRequest{
 		Name:   spec.Name,
 		Region: d.cfg.Region,
-		Size:   d.cfg.Size,
+		Size:   size,
 		Image: godo.DropletCreateImage{
-			Slug: d.cfg.Image,
+			Slug: image,
 		},
 		SSHKeys:  []godo.DropletCreateSSHKey{{ID: keyID}},
 		UserData: spec.UserData,
@@ -87,4 +88,21 @@ func firstTag(tags []string) string {
 		return ""
 	}
 	return tags[0]
+}
+
+func (d *DigitalOcean) resolveImageSize(label string) (size, image string) {
+	if lc, ok := d.cfg.Labels[label]; ok {
+		if lc.Size != "" {
+			size = lc.Size
+		} else {
+			size = d.cfg.Size
+		}
+		if lc.Image != "" {
+			image = lc.Image
+		} else {
+			image = d.cfg.Image
+		}
+		return size, image
+	}
+	return d.cfg.Size, d.cfg.Image
 }
