@@ -1,0 +1,71 @@
+// Package digitalocean implements the provider.Provider interface for
+// DigitalOcean Droplets. It reports per-second billing and manages a
+// tag-scoped firewall for ephemeral workers.
+package digitalocean
+
+import (
+	"context"
+	"errors"
+	"fmt"
+
+	"github.com/digitalocean/godo"
+	"golang.org/x/oauth2"
+	"gopkg.in/yaml.v3"
+
+	"github.com/hstern/fj-bellows/internal/provider"
+)
+
+type DigitalOcean struct {
+	cfg       config
+	tag       string
+	client    doClient
+	newClient func(token string) doClient
+}
+
+func init() {
+	provider.Register("digitalocean", func() provider.Provider { return &DigitalOcean{} })
+}
+
+func (d *DigitalOcean) Configure(_ context.Context, tag string, node yaml.Node) error {
+	var cfg config
+	if err := node.Decode(&cfg); err != nil {
+		return fmt.Errorf("digitalocean: decode provider_config: %w", err)
+	}
+	cfg.setDefaults()
+	if err := cfg.validate(); err != nil {
+		return err
+	}
+	d.cfg = cfg
+	d.tag = tag
+	if d.newClient == nil {
+		d.newClient = newGodoClient
+	}
+	d.client = d.newClient(cfg.Token)
+	return nil
+}
+
+func (d *DigitalOcean) Provision(_ context.Context, _ provider.Spec) (provider.Instance, error) {
+	return provider.Instance{}, errors.New("digitalocean: not implemented")
+}
+
+func (d *DigitalOcean) Destroy(_ context.Context, _ string) error {
+	return errors.New("digitalocean: not implemented")
+}
+
+func (d *DigitalOcean) List(_ context.Context, _ string) ([]provider.Instance, error) {
+	return nil, errors.New("digitalocean: not implemented")
+}
+
+func (d *DigitalOcean) BillingModel() provider.BillingModel {
+	return provider.BillingPerSecond
+}
+
+func newGodoClient(token string) doClient {
+	tsrc := oauth2.StaticTokenSource(&oauth2.Token{AccessToken: token})
+	cl, err := godo.New(oauth2.NewClient(context.Background(), tsrc))
+	if err != nil {
+		// godo.New only errors on nil http.Client; we always supply one.
+		panic(fmt.Sprintf("digitalocean: create godo client: %v", err))
+	}
+	return &godoClient{client: cl}
+}
