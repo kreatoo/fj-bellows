@@ -138,6 +138,31 @@ func (c *Client) ListRunners(ctx context.Context) ([]Runner, error) {
 	return arr, nil
 }
 
+// RegisterPersistent registers a persistent (non-ephemeral) runner and returns
+// its uuid and registration token. Unlike RegisterEphemeral the runner stays
+// registered after its first job completes (or when no daemon ever connects).
+// fj-bellows uses this to maintain a "listener" runner so Forgejo's cron
+// scheduler creates scheduled workflow runs even when no ephemeral runner is
+// currently alive.
+func (c *Client) RegisterPersistent(ctx context.Context, name string, labels []string) (Registration, error) {
+	body, _ := json.Marshal(map[string]any{
+		"name":   name,
+		"labels": labels,
+	})
+	raw, err := c.do(ctx, http.MethodPost, "/actions/runners", body)
+	if err != nil {
+		return Registration{}, err
+	}
+	var reg Registration
+	if err := json.Unmarshal(raw, &reg); err != nil {
+		return Registration{}, fmt.Errorf("decode registration: %w", err)
+	}
+	if reg.UUID == "" || reg.Token == "" {
+		return Registration{}, fmt.Errorf("registration response missing uuid/token: %s", raw)
+	}
+	return reg, nil
+}
+
 // DeleteRunner removes a runner registration by id.
 func (c *Client) DeleteRunner(ctx context.Context, id int64) error {
 	_, err := c.do(ctx, http.MethodDelete, "/actions/runners/"+strconv.FormatInt(id, 10), nil)

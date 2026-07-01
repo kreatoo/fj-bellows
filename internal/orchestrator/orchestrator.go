@@ -33,6 +33,7 @@ import (
 type JobSource interface {
 	WaitingJobs(ctx context.Context) ([]forgejo.WaitingJob, error)
 	RegisterEphemeral(ctx context.Context, name string, labels []string) (forgejo.Registration, error)
+	RegisterPersistent(ctx context.Context, name string, labels []string) (forgejo.Registration, error)
 	ListRunners(ctx context.Context) ([]forgejo.Runner, error)
 	DeleteRunner(ctx context.Context, id int64) error
 }
@@ -120,6 +121,12 @@ type Orchestrator struct {
 	lastProviderListAt time.Time
 	lastForgejoPollAt  time.Time
 
+	// listenerUUID is the registered persistent "listener" runner that keeps
+	// Forgejo's cron scheduler active. Without it, Forgejo skips creating
+	// scheduled-workflow runs when no ephemeral runner is alive. Set at
+	// startup by ensureListenerRunner.
+	listenerUUID string
+
 	// reapSeen tracks runner UUIDs that looked like zombies last tick; only
 	// reaped after two consecutive sightings so a just-registered runner is not
 	// deleted in the window before its UUID is recorded. Touched only by the
@@ -161,6 +168,13 @@ func New(cfg Config, prov provider.Provider, jobs JobSource, disp Dispatcher, lo
 func (o *Orchestrator) Run(ctx context.Context) error {
 	jobCtx, cancelJobs := context.WithCancel(context.Background())
 	defer cancelJobs()
+
+	// Register (or refresh) the persistent listener runner so Forgejo's
+	// cron scheduler creates scheduled-workflow runs even when no ephemeral
+	// runner is alive. A timeout prevents this from blocking startup.
+	listenerCtx, cancelListener := context.WithTimeout(context.Background(), 10*time.Second)
+	o.ensureListenerRunner(listenerCtx)
+	cancelListener()
 
 	t := time.NewTicker(o.cfg.PollInterval)
 	defer t.Stop()
@@ -553,7 +567,7 @@ func (o *Orchestrator) reapZombieRunners(ctx context.Context) {
 	prefix := o.cfg.Tag + "-"
 	seen := map[string]struct{}{}
 	for _, r := range runners {
-		if !strings.HasPrefix(r.Name, prefix) || o.isActive(r.UUID) {
+		if !strings.HasPrefix(r.Name, prefix) || o.isActive(r.UUID) || r.UUID == o.listenerUUID {
 			continue
 		}
 		if _, twice := o.reapSeen[r.UUID]; !twice {
@@ -903,6 +917,43 @@ func generateHostKey() (privPEM string, pub ssh.PublicKey, err error) {
 		return "", nil, fmt.Errorf("derive host public key: %w", err)
 	}
 	return string(pem.EncodeToMemory(block)), sshPub, nil
+}
+
+// ensureListenerRunner registers a persistent "listener" runner with Forgejo.
+// Forgejo's cron scheduler only creates scheduled workflow runs when at least
+// one runner is registered; ephemeral-only deployments (like fj-bellows) see
+// zero registered runners between jobs, so scheduled workflows silently never
+// trigger without this. The listener never runs actual jobs (no daemon backs
+// it) — it is a lightweight registration record that keeps the cron path open.
+//
+// Old listener runners from prior daemon lifecycles are cleaned up on every
+// startup so the registry does not accumulate stale entries.
+func (o *Orchestrator) ensureListenerRunner(ctx context.Context) {
+	name := "fj-bellows-listener-" + o.cfg.Tag
+
+	// Garbage-collect any listener runner from a previous lifecycle.
+	runners, err := o.jobs.ListRunners(ctx)
+	if err != nil {
+		o.log.Warn("list runners for listener cleanup", "err", err)
+	} else {
+		for _, r := range runners {
+			if r.Name == name {
+				if err := o.jobs.DeleteRunner(ctx, r.ID); err != nil {
+					o.log.Warn("delete stale listener runner", "id", r.ID, "err", err)
+				} else {
+					o.log.Info("deleted stale listener runner", "id", r.ID)
+				}
+			}
+		}
+	}
+
+	reg, err := o.jobs.RegisterPersistent(ctx, name, o.cfg.Labels)
+	if err != nil {
+		o.log.Warn("register listener runner (scheduled workflows may not trigger)", "err", err)
+		return
+	}
+	o.listenerUUID = reg.UUID
+	o.log.Info("listener runner registered", "uuid", reg.UUID, "name", name)
 }
 
 func shortID() string {

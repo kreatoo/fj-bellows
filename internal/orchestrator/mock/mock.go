@@ -14,10 +14,11 @@ import (
 
 // JobSource mocks orchestrator.JobSource.
 type JobSource struct {
-	WaitingJobsFn       func(ctx context.Context) ([]forgejo.WaitingJob, error)
-	RegisterEphemeralFn func(ctx context.Context, name string, labels []string) (forgejo.Registration, error)
-	ListRunnersFn       func(ctx context.Context) ([]forgejo.Runner, error)
-	DeleteRunnerFn      func(ctx context.Context, id int64) error
+	WaitingJobsFn        func(ctx context.Context) ([]forgejo.WaitingJob, error)
+	RegisterEphemeralFn  func(ctx context.Context, name string, labels []string) (forgejo.Registration, error)
+	RegisterPersistentFn func(ctx context.Context, name string, labels []string) (forgejo.Registration, error)
+	ListRunnersFn        func(ctx context.Context) ([]forgejo.Runner, error)
+	DeleteRunnerFn       func(ctx context.Context, id int64) error
 
 	mu            sync.Mutex
 	RegisterCalls []string // names passed to RegisterEphemeral
@@ -41,6 +42,14 @@ func (m *JobSource) RegisterEphemeral(ctx context.Context, name string, labels [
 		return m.RegisterEphemeralFn(ctx, name, labels)
 	}
 	return forgejo.Registration{UUID: "uuid", Token: "token"}, nil
+}
+
+// RegisterPersistent delegates to RegisterPersistentFn if set.
+func (m *JobSource) RegisterPersistent(ctx context.Context, name string, labels []string) (forgejo.Registration, error) {
+	if m.RegisterPersistentFn != nil {
+		return m.RegisterPersistentFn(ctx, name, labels)
+	}
+	return forgejo.Registration{UUID: "listener-uuid", Token: "listener-token"}, nil
 }
 
 // RegisterCount returns how many times RegisterEphemeral was called.

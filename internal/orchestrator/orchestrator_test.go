@@ -429,6 +429,87 @@ func TestReapSkipsActiveRunner(t *testing.T) {
 	}
 }
 
+// TestReapSkipsListenerRunner covers that the persistent listener runner
+// registered at startup is excluded from zombie reaping. Without this
+// exclusion the listener (named with our prefix but not in active) would be
+// reaped on the second reconcile tick.
+func TestReapSkipsListenerRunner(t *testing.T) {
+	prov := &pmock.Provider{}
+	jobs := &omock.JobSource{
+		ListRunnersFn: func(context.Context) ([]forgejo.Runner, error) {
+			return []forgejo.Runner{{ID: 1, UUID: "listener-uuid", Name: "fj-bellows-listener-test"}}, nil
+		},
+	}
+	o := New(baseConfig(), prov, jobs, &omock.Dispatcher{}, nil)
+	o.listenerUUID = "listener-uuid"
+
+	o.Reconcile(context.Background())
+	o.Reconcile(context.Background())
+	if jobs.DeleteCount() != 0 {
+		t.Errorf("reaped the listener runner: %v", jobs.DeleteCalls)
+	}
+}
+
+// TestReapReapsOtherRunnersWhenListenerPresent covers that setting listenerUUID
+// does not prevent reaping of genuinely orphaned runners — only the specific
+// listener UUID is excluded.
+func TestReapReapsOtherRunnersWhenListenerPresent(t *testing.T) {
+	prov := &pmock.Provider{}
+	jobs := &omock.JobSource{
+		ListRunnersFn: func(context.Context) ([]forgejo.Runner, error) {
+			return []forgejo.Runner{
+				{ID: 1, UUID: "listener-uuid", Name: "fj-bellows-listener-test"},
+				{ID: 2, UUID: "zombie-uuid", Name: "fj-bellows-zombie"},
+			}, nil
+		},
+	}
+	o := New(baseConfig(), prov, jobs, &omock.Dispatcher{}, nil)
+	o.listenerUUID = "listener-uuid"
+
+	o.Reconcile(context.Background()) // first sighting for both
+	if jobs.DeleteCount() != 0 {
+		t.Fatalf("deleted on first sighting: %d", jobs.DeleteCount())
+	}
+	o.Reconcile(context.Background()) // second sighting: zombie reaped, listener spared
+	if jobs.DeleteCount() != 1 || jobs.DeleteCalls[0] != 2 {
+		t.Fatalf("expected to reap runner 2 (zombie) only, got DeleteCalls=%v", jobs.DeleteCalls)
+	}
+}
+
+// TestRunRegistersListener covers that Run() calls RegisterPersistent at
+// startup and stores the returned UUID as listenerUUID.
+func TestRunRegistersListener(t *testing.T) {
+	var regCalled bool
+	prov := &pmock.Provider{}
+	jobs := &omock.JobSource{
+		RegisterPersistentFn: func(_ context.Context, name string, labels []string) (forgejo.Registration, error) {
+			regCalled = true
+			if name != "fj-bellows-listener-"+"fj-bellows" {
+				t.Errorf("listener name = %q", name)
+			}
+			return forgejo.Registration{UUID: "l-uuid", Token: "l-token"}, nil
+		},
+	}
+	cfg := baseConfig()
+	cfg.PollInterval = 10 * time.Millisecond
+	o := New(cfg, prov, jobs, &omock.Dispatcher{}, nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	runDone := make(chan struct{})
+	go func() { _ = o.Run(ctx); close(runDone) }()
+
+	time.Sleep(100 * time.Millisecond)
+	cancel()
+	<-runDone
+
+	if !regCalled {
+		t.Error("RegisterPersistent was never called at startup")
+	}
+	if o.listenerUUID != "l-uuid" {
+		t.Errorf("listenerUUID = %q, want l-uuid", o.listenerUUID)
+	}
+}
+
 func TestRunDrainsInFlightJob(t *testing.T) {
 	started := make(chan struct{})
 	release := make(chan struct{})

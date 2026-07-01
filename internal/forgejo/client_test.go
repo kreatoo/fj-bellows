@@ -129,6 +129,45 @@ func TestRegisterEphemeralMissingFields(t *testing.T) {
 	}
 }
 
+func TestRegisterPersistent(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Errorf("method = %s", r.Method)
+		}
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if _, ok := body["ephemeral"]; ok {
+			t.Errorf("ephemeral should be absent for persistent runner: %+v", body)
+		}
+		if body["name"] != "listener" {
+			t.Errorf("name = %v", body["name"])
+		}
+		_, _ = io.WriteString(w, `{"uuid":"u-persist","token":"tok-persist"}`)
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "orgs/example", "t", "docker")
+	reg, err := c.RegisterPersistent(context.Background(), "listener", []string{"docker"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reg.UUID != "u-persist" || reg.Token != "tok-persist" {
+		t.Fatalf("reg = %+v", reg)
+	}
+}
+
+func TestRegisterPersistentMissingFields(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{}`)
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "orgs/x", "t")
+	if _, err := c.RegisterPersistent(context.Background(), "r", nil); err == nil {
+		t.Fatal("expected error for missing uuid/token")
+	}
+}
+
 func TestRegisterEphemeralForgejo12(t *testing.T) {
 	// Forgejo 12 has no POST /actions/runners endpoint and returns 404. The
 	// client surfaces that with a "requires Forgejo >= 15" hint so the
