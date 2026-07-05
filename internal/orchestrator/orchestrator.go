@@ -39,11 +39,11 @@ type JobSource interface {
 }
 
 // Heartbeater is an optional interface that a JobSource may satisfy to keep a
-// runner "online" in Forgejo via the runner-protocol FetchTask RPC. The real
+// runner "online" in Forgejo via the runner-protocol Declare RPC. The real
 // forgejo.Client implements this; the test mock does not (so tests that don't
 // exercise the heartbeat simply skip it).
 type Heartbeater interface {
-	FetchTaskHeartbeat(ctx context.Context, runnerUUID, runnerToken string) error
+	Declare(ctx context.Context, runnerUUID, runnerToken string, labels []string) error
 }
 
 // Config holds the orchestrator's runtime parameters, decoupled from the
@@ -980,12 +980,9 @@ func (o *Orchestrator) ensureListenerRunner(ctx context.Context) {
 		}
 	}
 
-	// Unique label so FetchTask never matches a real workflow's runs_on.
-	// ListenerLabels defaults to ["fj-bellows-listener"] but is configurable.
-	labels := o.cfg.ListenerLabels
-	if len(labels) == 0 {
-		labels = []string{"fj-bellows-listener"}
-	}
+	// Register with the same labels as the pool so Forgejo considers
+	// scheduled jobs "runnable". Can be overridden via ListenerLabels.
+	labels := o.listenerLabels()
 	reg, err := o.jobs.RegisterPersistent(ctx, name, labels)
 	if err != nil {
 		o.log.Warn("register listener runner (scheduled workflows may not trigger)", "err", err)
@@ -997,21 +994,25 @@ func (o *Orchestrator) ensureListenerRunner(ctx context.Context) {
 }
 
 // heartbeatLoop keeps the listener runner "online" in Forgejo by periodically
-// calling the FetchTask RPC. Forgejo considers a runner offline if it has not
-// called FetchTask within a timeout (typically a few minutes). A 30s interval
-// is well within that window and much lighter than the runner's own 2s poll.
+// calling the Declare RPC. Forgejo considers a runner offline if it has not
+// made an authenticated runner-protocol call within a timeout (typically a
+// few minutes). A 30s interval is well within that window.
 //
-// The loop exits when ctx is cancelled (shutdown). Heartbeat errors are logged
-// but do not stop the loop — a transient network blip should not kill the
-// heartbeat permanently.
+// Declare is used instead of FetchTask so the listener never picks up a task
+// — the listener has the SAME labels as the pool (so Forgejo considers
+// scheduled jobs "runnable"), but it must not steal jobs from the queue.
+// Declare just touches the runner record and re-publishes labels.
+//
+// The loop exits when ctx is cancelled (shutdown). Errors are logged but do
+// not stop the loop — a transient network blip should not kill the heartbeat.
 func (o *Orchestrator) heartbeatLoop(ctx context.Context, hb Heartbeater) {
 	const interval = 30 * time.Second
+	labels := o.listenerLabels()
 	t := time.NewTicker(interval)
 	defer t.Stop()
 
-	// Send an immediate first heartbeat so the runner shows online right away
-	// instead of waiting up to interval for the first tick.
-	if err := hb.FetchTaskHeartbeat(ctx, o.listenerUUID, o.listenerToken); err != nil {
+	// Send an immediate first heartbeat so the runner shows online right away.
+	if err := hb.Declare(ctx, o.listenerUUID, o.listenerToken, labels); err != nil {
 		o.log.Warn("listener heartbeat", "err", err)
 	}
 	for {
@@ -1019,11 +1020,21 @@ func (o *Orchestrator) heartbeatLoop(ctx context.Context, hb Heartbeater) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			if err := hb.FetchTaskHeartbeat(ctx, o.listenerUUID, o.listenerToken); err != nil {
+			if err := hb.Declare(ctx, o.listenerUUID, o.listenerToken, labels); err != nil {
 				o.log.Warn("listener heartbeat", "err", err)
 			}
 		}
 	}
+}
+
+// listenerLabels resolves which labels the listener runner should declare.
+// Defaults to the pool labels (cfg.Labels) so Forgejo sees scheduled jobs as
+// "runnable"; can be overridden via cfg.ListenerLabels.
+func (o *Orchestrator) listenerLabels() []string {
+	if len(o.cfg.ListenerLabels) > 0 {
+		return o.cfg.ListenerLabels
+	}
+	return forgejo.BareLabels(o.cfg.Labels)
 }
 
 func shortID() string {

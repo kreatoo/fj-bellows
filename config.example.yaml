@@ -33,12 +33,11 @@ forgejo:
     - 'ubuntu-latest:docker://catthehacker/ubuntu:act-latest'
 
   # Labels for the persistent "listener" runner that keeps Forgejo's cron
-  # scheduler active (Forgejo only creates scheduled-workflow runs when at
-  # least one runner is online). The default ["fj-bellows-listener"] is a
-  # unique label no real workflow uses, so the FetchTask heartbeat never
-  # picks up a job. Leave unset unless you have a specific reason.
+  # scheduler active. Empty (the default) uses the same labels as the pool
+  # above — this is what you want, since Forgejo only creates scheduled-
+  # workflow runs when an online runner with matching labels exists.
   # listener_labels:
-  #   - fj-bellows-listener
+  #   - ubuntu-latest
 
 # Tag stamped on every instance this deployment owns. SET A UNIQUE TAG per
 # deployment if multiple fj-bellows run against the same cloud account, or

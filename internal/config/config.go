@@ -54,12 +54,11 @@ type Forgejo struct {
 	// required labels are present here.
 	Labels []string `yaml:"labels"`
 
-	// ListenerLabels are the labels registered on the persistent "listener"
-	// runner that keeps Forgejo's cron scheduler active. Defaults to
-	// ["fj-bellows-listener"] — a unique label no real workflow uses so the
-	// FetchTask heartbeat never picks up a job. Override only if you know
-	// what you're doing: matching a real workflow's runs_on here would cause
-	// the listener to steal jobs from the queue.
+	// ListenerLabels overrides the labels on the persistent "listener"
+	// runner. Empty (the default) means use the pool labels — this is what
+	// you want: Forgejo only creates scheduled-workflow runs when an online
+	// runner with matching labels exists. Override only if you have a
+	// specific reason to use different labels.
 	ListenerLabels []string `yaml:"listener_labels"`
 }
 
@@ -150,9 +149,6 @@ func (c *Config) applyDefaults() {
 	}
 	if c.SSH.Port == 0 {
 		c.SSH.Port = 22
-	}
-	if len(c.Forgejo.ListenerLabels) == 0 {
-		c.Forgejo.ListenerLabels = []string{"fj-bellows-listener"}
 	}
 	c.Transport.applyDefaults()
 }

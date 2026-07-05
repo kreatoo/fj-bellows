@@ -172,23 +172,23 @@ func (c *Client) DeleteRunner(ctx context.Context, id int64) error {
 	return err
 }
 
-// FetchTaskHeartbeat sends a FetchTask RPC to Forgejo's runner-protocol
-// endpoint using the given runner credentials. Forgejo marks a runner as
-// "online" only while it is actively calling FetchTask; this method is the
-// heartbeat that keeps the persistent listener runner visible as active.
+// Declare sends a Declare RPC to Forgejo's runner-protocol endpoint. Forgejo
+// marks a runner as "online" when it receives any authenticated runner-protocol
+// call; Declare is the safest one for a heartbeat because — unlike FetchTask —
+// it never assigns a task to the caller. This lets the listener runner stay
+// online with the SAME labels as the pool without stealing jobs from the queue.
 //
 // The request is sent as a Connect-RPC unary call (JSON-encoded) with the
-// runner auth headers (x-runner-uuid / x-runner-token). Because the listener
-// is registered with a unique label that no workflow uses, FetchTask never
-// returns a real task — the call is purely a liveness ping.
-//
-// Returns nil on success (2xx response). A non-nil error means the heartbeat
-// failed; the caller should retry on the next interval.
-func (c *Client) FetchTaskHeartbeat(ctx context.Context, runnerUUID, runnerToken string) error {
-	u := c.rawURL + "/api/actions/runner.v1.RunnerService/FetchTask"
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, strings.NewReader(`{}`))
+// runner auth headers (x-runner-uuid / x-runner-token).
+func (c *Client) Declare(ctx context.Context, runnerUUID, runnerToken string, labels []string) error {
+	u := c.rawURL + "/api/actions/runner.v1.RunnerService/Declare"
+	body, _ := json.Marshal(map[string]any{
+		"version": "fj-bellows-listener",
+		"labels":  labels,
+	})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, bytes.NewReader(body))
 	if err != nil {
-		return fmt.Errorf("heartbeat request: %w", err)
+		return fmt.Errorf("declare request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Connect-Protocol-Version", "1")
@@ -196,12 +196,12 @@ func (c *Client) FetchTaskHeartbeat(ctx context.Context, runnerUUID, runnerToken
 	req.Header.Set("x-runner-token", runnerToken)
 	resp, err := c.hc.Do(req)
 	if err != nil {
-		return fmt.Errorf("heartbeat: %w", err)
+		return fmt.Errorf("declare: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		raw, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("heartbeat: status %d: %s", resp.StatusCode, raw)
+		return fmt.Errorf("declare: status %d: %s", resp.StatusCode, raw)
 	}
 	return nil
 }

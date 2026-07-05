@@ -254,8 +254,9 @@ func TestDoNon2xx(t *testing.T) {
 	}
 }
 
-func TestFetchTaskHeartbeat(t *testing.T) {
+func TestDeclare(t *testing.T) {
 	var gotMethod, gotPath, gotUUID, gotToken, gotCT, gotProtoVer string
+	var gotBody map[string]any
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotMethod = r.Method
 		gotPath = r.URL.Path
@@ -263,19 +264,20 @@ func TestFetchTaskHeartbeat(t *testing.T) {
 		gotToken = r.Header.Get("x-runner-token")
 		gotCT = r.Header.Get("Content-Type")
 		gotProtoVer = r.Header.Get("Connect-Protocol-Version")
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer srv.Close()
 
 	c := New(srv.URL, "orgs/example", "t", "docker")
-	err := c.FetchTaskHeartbeat(context.Background(), "uuid-1", "tok-1")
+	err := c.Declare(context.Background(), "uuid-1", "tok-1", []string{"ubuntu-latest"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if gotMethod != http.MethodPost {
 		t.Errorf("method = %s, want POST", gotMethod)
 	}
-	if gotPath != "/api/actions/runner.v1.RunnerService/FetchTask" {
+	if gotPath != "/api/actions/runner.v1.RunnerService/Declare" {
 		t.Errorf("path = %s", gotPath)
 	}
 	if gotUUID != "uuid-1" || gotToken != "tok-1" {
@@ -287,16 +289,19 @@ func TestFetchTaskHeartbeat(t *testing.T) {
 	if gotProtoVer != "1" {
 		t.Errorf("Connect-Protocol-Version = %q", gotProtoVer)
 	}
+	if labels, _ := gotBody["labels"].([]any); len(labels) != 1 || labels[0] != "ubuntu-latest" {
+		t.Errorf("labels = %v", gotBody["labels"])
+	}
 }
 
-func TestFetchTaskHeartbeatError(t *testing.T) {
+func TestDeclareError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, "bad runner", http.StatusUnauthorized)
 	}))
 	defer srv.Close()
 
 	c := New(srv.URL, "orgs/x", "t")
-	if err := c.FetchTaskHeartbeat(context.Background(), "u", "t"); err == nil {
+	if err := c.Declare(context.Background(), "u", "t", nil); err == nil {
 		t.Fatal("expected error on 401")
 	}
 }
