@@ -18,6 +18,7 @@ import (
 
 // Client talks to a single Forgejo instance, scoped to one runner owner.
 type Client struct {
+	rawURL string // the forgejo instance URL as configured (no trailing slash)
 	base   string // <url>/api/v1/<scope>
 	token  string
 	labels []string
@@ -29,8 +30,10 @@ type Client struct {
 // client filters the job queue by — the Forgejo /actions/runners/jobs endpoint
 // requires a non-empty labels query and returns null otherwise.
 func New(rawURL, scope, token string, labels ...string) *Client {
-	base := strings.TrimRight(rawURL, "/") + "/api/v1/" + strings.Trim(scope, "/")
+	trimmed := strings.TrimRight(rawURL, "/")
+	base := trimmed + "/api/v1/" + strings.Trim(scope, "/")
 	return &Client{
+		rawURL: trimmed,
 		base:   base,
 		token:  token,
 		labels: labels,
@@ -167,6 +170,40 @@ func (c *Client) RegisterPersistent(ctx context.Context, name string, labels []s
 func (c *Client) DeleteRunner(ctx context.Context, id int64) error {
 	_, err := c.do(ctx, http.MethodDelete, "/actions/runners/"+strconv.FormatInt(id, 10), nil)
 	return err
+}
+
+// FetchTaskHeartbeat sends a FetchTask RPC to Forgejo's runner-protocol
+// endpoint using the given runner credentials. Forgejo marks a runner as
+// "online" only while it is actively calling FetchTask; this method is the
+// heartbeat that keeps the persistent listener runner visible as active.
+//
+// The request is sent as a Connect-RPC unary call (JSON-encoded) with the
+// runner auth headers (x-runner-uuid / x-runner-token). Because the listener
+// is registered with a unique label that no workflow uses, FetchTask never
+// returns a real task — the call is purely a liveness ping.
+//
+// Returns nil on success (2xx response). A non-nil error means the heartbeat
+// failed; the caller should retry on the next interval.
+func (c *Client) FetchTaskHeartbeat(ctx context.Context, runnerUUID, runnerToken string) error {
+	u := c.rawURL + "/api/actions/runner.v1.RunnerService/FetchTask"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, strings.NewReader(`{}`))
+	if err != nil {
+		return fmt.Errorf("heartbeat request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Connect-Protocol-Version", "1")
+	req.Header.Set("x-runner-uuid", runnerUUID)
+	req.Header.Set("x-runner-token", runnerToken)
+	resp, err := c.hc.Do(req)
+	if err != nil {
+		return fmt.Errorf("heartbeat: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		raw, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("heartbeat: status %d: %s", resp.StatusCode, raw)
+	}
+	return nil
 }
 
 func (c *Client) do(ctx context.Context, method, path string, body []byte) ([]byte, error) {

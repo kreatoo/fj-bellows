@@ -38,6 +38,14 @@ type JobSource interface {
 	DeleteRunner(ctx context.Context, id int64) error
 }
 
+// Heartbeater is an optional interface that a JobSource may satisfy to keep a
+// runner "online" in Forgejo via the runner-protocol FetchTask RPC. The real
+// forgejo.Client implements this; the test mock does not (so tests that don't
+// exercise the heartbeat simply skip it).
+type Heartbeater interface {
+	FetchTaskHeartbeat(ctx context.Context, runnerUUID, runnerToken string) error
+}
+
 // Config holds the orchestrator's runtime parameters, decoupled from the
 // on-disk config struct.
 type Config struct {
@@ -127,6 +135,10 @@ type Orchestrator struct {
 	// startup by ensureListenerRunner.
 	listenerUUID string
 
+	// listenerToken is the registration token for the listener runner, used
+	// to authenticate FetchTask heartbeat calls.
+	listenerToken string
+
 	// reapSeen tracks runner UUIDs that looked like zombies last tick; only
 	// reaped after two consecutive sightings so a just-registered runner is not
 	// deleted in the window before its UUID is recorded. Touched only by the
@@ -175,6 +187,17 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 	listenerCtx, cancelListener := context.WithTimeout(context.Background(), 10*time.Second)
 	o.ensureListenerRunner(listenerCtx)
 	cancelListener()
+
+	// Start the FetchTask heartbeat loop so Forgejo considers the listener
+	// runner "online" (a registered-but-offline runner is not enough for the
+	// cron scheduler). Only possible when the JobSource implements Heartbeater
+	// (the real forgejo.Client does; the test mock does not).
+	if o.listenerUUID != "" {
+		if hb, ok := o.jobs.(Heartbeater); ok {
+			o.wg.Go(func() { o.heartbeatLoop(ctx, hb) })
+			o.log.Info("listener heartbeat started")
+		}
+	}
 
 	t := time.NewTicker(o.cfg.PollInterval)
 	defer t.Stop()
@@ -921,10 +944,14 @@ func generateHostKey() (privPEM string, pub ssh.PublicKey, err error) {
 
 // ensureListenerRunner registers a persistent "listener" runner with Forgejo.
 // Forgejo's cron scheduler only creates scheduled workflow runs when at least
-// one runner is registered; ephemeral-only deployments (like fj-bellows) see
-// zero registered runners between jobs, so scheduled workflows silently never
-// trigger without this. The listener never runs actual jobs (no daemon backs
-// it) — it is a lightweight registration record that keeps the cron path open.
+// one runner is online; ephemeral-only deployments (like fj-bellows) see zero
+// online runners between jobs, so scheduled workflows silently never trigger
+// without this.
+//
+// The listener is registered with a UNIQUE label ("fj-bellows-listener") that
+// no real workflow uses, so the FetchTask heartbeat never receives a task —
+// the call is purely a liveness ping that keeps Forgejo's runner-online flag
+// set. Actual jobs are picked up by ephemeral runners as usual.
 //
 // Old listener runners from prior daemon lifecycles are cleaned up on every
 // startup so the registry does not accumulate stale entries.
@@ -947,13 +974,45 @@ func (o *Orchestrator) ensureListenerRunner(ctx context.Context) {
 		}
 	}
 
-	reg, err := o.jobs.RegisterPersistent(ctx, name, o.cfg.Labels)
+	// Unique label so FetchTask never matches a real workflow's runs_on.
+	reg, err := o.jobs.RegisterPersistent(ctx, name, []string{"fj-bellows-listener"})
 	if err != nil {
 		o.log.Warn("register listener runner (scheduled workflows may not trigger)", "err", err)
 		return
 	}
 	o.listenerUUID = reg.UUID
+	o.listenerToken = reg.Token
 	o.log.Info("listener runner registered", "uuid", reg.UUID, "name", name)
+}
+
+// heartbeatLoop keeps the listener runner "online" in Forgejo by periodically
+// calling the FetchTask RPC. Forgejo considers a runner offline if it has not
+// called FetchTask within a timeout (typically a few minutes). A 30s interval
+// is well within that window and much lighter than the runner's own 2s poll.
+//
+// The loop exits when ctx is cancelled (shutdown). Heartbeat errors are logged
+// but do not stop the loop — a transient network blip should not kill the
+// heartbeat permanently.
+func (o *Orchestrator) heartbeatLoop(ctx context.Context, hb Heartbeater) {
+	const interval = 30 * time.Second
+	t := time.NewTicker(interval)
+	defer t.Stop()
+
+	// Send an immediate first heartbeat so the runner shows online right away
+	// instead of waiting up to interval for the first tick.
+	if err := hb.FetchTaskHeartbeat(ctx, o.listenerUUID, o.listenerToken); err != nil {
+		o.log.Warn("listener heartbeat", "err", err)
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			if err := hb.FetchTaskHeartbeat(ctx, o.listenerUUID, o.listenerToken); err != nil {
+				o.log.Warn("listener heartbeat", "err", err)
+			}
+		}
+	}
 }
 
 func shortID() string {

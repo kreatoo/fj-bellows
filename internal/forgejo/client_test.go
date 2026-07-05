@@ -253,3 +253,50 @@ func TestDoNon2xx(t *testing.T) {
 		t.Fatal("expected error on 403")
 	}
 }
+
+func TestFetchTaskHeartbeat(t *testing.T) {
+	var gotMethod, gotPath, gotUUID, gotToken, gotCT, gotProtoVer string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod = r.Method
+		gotPath = r.URL.Path
+		gotUUID = r.Header.Get("x-runner-uuid")
+		gotToken = r.Header.Get("x-runner-token")
+		gotCT = r.Header.Get("Content-Type")
+		gotProtoVer = r.Header.Get("Connect-Protocol-Version")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "orgs/example", "t", "docker")
+	err := c.FetchTaskHeartbeat(context.Background(), "uuid-1", "tok-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotMethod != http.MethodPost {
+		t.Errorf("method = %s, want POST", gotMethod)
+	}
+	if gotPath != "/api/actions/runner.v1.RunnerService/FetchTask" {
+		t.Errorf("path = %s", gotPath)
+	}
+	if gotUUID != "uuid-1" || gotToken != "tok-1" {
+		t.Errorf("auth headers uuid=%q token=%q", gotUUID, gotToken)
+	}
+	if gotCT != "application/json" {
+		t.Errorf("content-type = %q", gotCT)
+	}
+	if gotProtoVer != "1" {
+		t.Errorf("Connect-Protocol-Version = %q", gotProtoVer)
+	}
+}
+
+func TestFetchTaskHeartbeatError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "bad runner", http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "orgs/x", "t")
+	if err := c.FetchTaskHeartbeat(context.Background(), "u", "t"); err == nil {
+		t.Fatal("expected error on 401")
+	}
+}
