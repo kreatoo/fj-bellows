@@ -58,6 +58,12 @@ type Config struct {
 	Teardown      TeardownPolicy
 	AuthorizedKey string
 
+	// ListenerLabels are the labels for the persistent listener runner.
+	// Defaults to ["fj-bellows-listener"]. Must NOT match any real
+	// workflow's runs_on or the listener's FetchTask heartbeat will steal
+	// jobs from the queue.
+	ListenerLabels []string
+
 	// FJBAgentDownloadURL is the fully-resolved URL workers fetch fjbagent
 	// from in cloud-init (FJB-94). The agent version implicitly tracks
 	// the orchestrator's build (this is the only design that makes sense
@@ -975,7 +981,12 @@ func (o *Orchestrator) ensureListenerRunner(ctx context.Context) {
 	}
 
 	// Unique label so FetchTask never matches a real workflow's runs_on.
-	reg, err := o.jobs.RegisterPersistent(ctx, name, []string{"fj-bellows-listener"})
+	// ListenerLabels defaults to ["fj-bellows-listener"] but is configurable.
+	labels := o.cfg.ListenerLabels
+	if len(labels) == 0 {
+		labels = []string{"fj-bellows-listener"}
+	}
+	reg, err := o.jobs.RegisterPersistent(ctx, name, labels)
 	if err != nil {
 		o.log.Warn("register listener runner (scheduled workflows may not trigger)", "err", err)
 		return

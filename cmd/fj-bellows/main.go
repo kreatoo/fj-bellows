@@ -852,6 +852,7 @@ func buildOrchestratorConfig(cfg *config.Config, opts runOpts, buildVersion, aut
 		Tag:                 cfg.Tag,
 		MaxScale:            cfg.Scale.Max,
 		Labels:              cfg.Forgejo.Labels,
+		ListenerLabels:      cfg.Forgejo.ListenerLabels,
 		PollInterval:        cfg.Poll.Interval.D(),
 		RunnerVersion:       opts.runnerVersion,
 		ReadyFile:           bootstrap.DefaultReadyFile,

@@ -53,6 +53,14 @@ type Forgejo struct {
 	// Labels this pool services. A waiting job is eligible only if all of its
 	// required labels are present here.
 	Labels []string `yaml:"labels"`
+
+	// ListenerLabels are the labels registered on the persistent "listener"
+	// runner that keeps Forgejo's cron scheduler active. Defaults to
+	// ["fj-bellows-listener"] — a unique label no real workflow uses so the
+	// FetchTask heartbeat never picks up a job. Override only if you know
+	// what you're doing: matching a real workflow's runs_on here would cause
+	// the listener to steal jobs from the queue.
+	ListenerLabels []string `yaml:"listener_labels"`
 }
 
 // Scale bounds the warm pool.
@@ -142,6 +150,9 @@ func (c *Config) applyDefaults() {
 	}
 	if c.SSH.Port == 0 {
 		c.SSH.Port = 22
+	}
+	if len(c.Forgejo.ListenerLabels) == 0 {
+		c.Forgejo.ListenerLabels = []string{"fj-bellows-listener"}
 	}
 	c.Transport.applyDefaults()
 }
