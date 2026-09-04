@@ -70,11 +70,17 @@ func (b *Backend) SetCacheStatus(fn func(ctx context.Context) *control.CacheStat
 	b.mu.Unlock()
 }
 
-// Optional metrics lifecycle values; tests can use zero defaults.
+// PendingProvisions returns the number of in-flight provisions.
 func (b *Backend) PendingProvisions() int { return 0 }
-func (b *Backend) ActiveJobs() int        { return 0 }
-func (b *Backend) DispatchingJobs() int   { return 0 }
-func (b *Backend) Destroying() int        { return 0 }
+
+// ActiveJobs returns the number of active jobs.
+func (b *Backend) ActiveJobs() int { return 0 }
+
+// DispatchingJobs returns the number of jobs being dispatched.
+func (b *Backend) DispatchingJobs() int { return 0 }
+
+// Destroying returns the number of workers being destroyed.
+func (b *Backend) Destroying() int { return 0 }
 
 // Health implements control.Backend.
 func (b *Backend) Health(ctx context.Context) control.HealthStatus {
