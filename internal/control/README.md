@@ -34,7 +34,17 @@ scrape_configs:
 Useful series include `fjb_workers{state=...}`, `fjb_pending_provisions`,
 `fjb_active_jobs`, `fjb_destroying_workers`, `fjb_healthy`,
 `fjb_last_provider_list_age_seconds`, `fjb_last_forgejo_poll_age_seconds`,
-and `fjb_events_total{type=...}`. Keep the listener loopback-bound or protect
+`fjb_cache_present`, `fjb_cache_status_age_seconds`,
+`fjb_reconcile_duration_seconds`, `fjb_provision_to_ready_seconds`,
+`fjb_job_duration_seconds`, `fjb_destroy_duration_seconds`,
+`fjb_control_rpc_duration_seconds{procedure,code}`,
+`fjb_control_rpc_errors_total{procedure,code}`,
+`fjb_http_request_duration_seconds{method,route}`,
+`fjb_http_requests_total{method,route,status_class}`,
+`fjb_operation_errors_total{operation=...}`, and `fjb_events_total{type=...}`.
+Histogram values are seconds and are suitable for `histogram_quantile`; all
+labels are bounded state, route, procedure, and operation names (never job IDs or instance IDs).
+Keep the listener loopback-bound or protect
 non-loopback access with network policy; the endpoint intentionally has no
 bearer-token requirement for scraper compatibility.
 

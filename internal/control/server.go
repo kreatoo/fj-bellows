@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"time"
 
+	"connectrpc.com/connect"
 	"github.com/hstern/fj-bellows/gen/fjbellows/control/v1/controlv1connect"
 )
 
@@ -65,15 +66,15 @@ func NewServer(listen string, backend Backend, log *slog.Logger, opts ...Option)
 	}
 
 	mux := http.NewServeMux()
+	m := newMetrics(backend, time.Now)
 
 	path, handler := controlv1connect.NewControlServiceHandler(&apiHandler{
 		b:            backend,
 		enableWrites: cfg.enableWrites,
-	})
+	}, connect.WithInterceptors(m.interceptor()))
 	mux.Handle(path, handler)
 	mux.HandleFunc("/healthz", plainHealthz(backend))
 
-	m := newMetrics(backend, time.Now)
 	mux.Handle("/metrics", m.handler())
 
 	// Enable HTTP/2 cleartext so gRPC clients can speak h2c over the
@@ -88,7 +89,7 @@ func NewServer(listen string, backend Backend, log *slog.Logger, opts ...Option)
 		backend: backend,
 		metrics: m,
 		srv: &http.Server{
-			Handler:           bearerAuth(mux, cfg.token),
+			Handler:           m.httpMiddleware(bearerAuth(mux, cfg.token)),
 			Protocols:         &protos,
 			ReadHeaderTimeout: 5 * time.Second,
 		},
@@ -117,6 +118,7 @@ func (s *Server) Run(ctx context.Context) error {
 	teeCtx, cancelTee := context.WithCancel(ctx)
 	defer cancelTee()
 	go s.metrics.runEventTee(teeCtx, s.backend, s.log)
+	go s.metrics.runCachePoller(teeCtx, s.backend, s.log)
 
 	serveErr := make(chan error, 1)
 	go func() {

@@ -344,21 +344,24 @@ type forceResult struct {
 // summary the control plane's Reconcile RPC surfaces to operators.
 func (o *Orchestrator) Reconcile(ctx context.Context) ReconcileResult {
 	var r ReconcileResult
+	started := time.Now()
 	defer func() {
 		o.markTick()
 		o.emit("reconcile_tick", map[string]string{
-			"provisioned": strconv.Itoa(r.Provisioned),
-			"dispatched":  strconv.Itoa(r.Dispatched),
-			"reaped":      strconv.Itoa(r.Reaped),
-			"adopted":     strconv.Itoa(r.Adopted),
-			"dropped":     strconv.Itoa(r.Dropped),
-			"errors":      strconv.Itoa(len(r.Errors)),
+			"provisioned":  strconv.Itoa(r.Provisioned),
+			"dispatched":   strconv.Itoa(r.Dispatched),
+			"reaped":       strconv.Itoa(r.Reaped),
+			"adopted":      strconv.Itoa(r.Adopted),
+			"dropped":      strconv.Itoa(r.Dropped),
+			"errors":       strconv.Itoa(len(r.Errors)),
+			attrDurationMS: strconv.FormatInt(time.Since(started).Milliseconds(), 10),
 		})
 	}()
 
 	insts, err := o.prov.List(ctx, o.cfg.Tag)
 	if err != nil {
 		o.log.Error("list instances", "err", err)
+		o.emit("reconcile_error", map[string]string{attrOperation: "provider_list"})
 		r.Errors = append(r.Errors, "list instances: "+err.Error())
 		return r
 	}
@@ -368,6 +371,7 @@ func (o *Orchestrator) Reconcile(ctx context.Context) ReconcileResult {
 	jobs, err := o.jobs.WaitingJobs(ctx)
 	if err != nil {
 		o.log.Error("poll waiting jobs", "err", err)
+		o.emit("reconcile_error", map[string]string{attrOperation: "waiting_jobs"})
 		r.Errors = append(r.Errors, "poll waiting jobs: "+err.Error())
 		jobs = nil
 	} else {
@@ -517,6 +521,7 @@ func (o *Orchestrator) doForceReap(ctx context.Context, instanceID string) error
 	if !ok {
 		return fmt.Errorf("instance %q not in pool", instanceID)
 	}
+	started := time.Now()
 	if n.State == StateBusy {
 		return fmt.Errorf("instance %q is busy; wait for the job to finish before reaping", instanceID)
 	}
@@ -535,6 +540,7 @@ func (o *Orchestrator) doForceReap(ctx context.Context, instanceID string) error
 	}
 	if err := o.prov.Destroy(ctx, instanceID); err != nil {
 		o.log.Error("force-reap destroy", "id", instanceID, "err", err)
+		o.emit("worker_destroy_failed", map[string]string{attrID: instanceID, attrIP: n.IP, attrOperation: "destroy", attrDurationMS: strconv.FormatInt(time.Since(started).Milliseconds(), 10)})
 		// Drop back to Idle so the next teardown tick (or another force-reap)
 		// can retry. Reaping a node twice is harmless — provider.Destroy is
 		// idempotent.
@@ -543,7 +549,7 @@ func (o *Orchestrator) doForceReap(ctx context.Context, instanceID string) error
 	}
 	o.pool.Delete(instanceID)
 	o.log.Info("force-reaped worker", "id", instanceID, "ip", n.IP)
-	o.emit("worker_reaped", map[string]string{attrID: instanceID, attrIP: n.IP})
+	o.emit("worker_reaped", map[string]string{attrID: instanceID, attrIP: n.IP, attrDurationMS: strconv.FormatInt(time.Since(started).Milliseconds(), 10)})
 	return nil
 }
 
@@ -553,6 +559,7 @@ func (o *Orchestrator) doForceReap(ctx context.Context, instanceID string) error
 // off-loaded to a wg goroutine the same way provisionOne does, so the
 // daemon doesn't block its reconcile loop on a slow boot.
 func (o *Orchestrator) doForceProvision(ctx context.Context) forceResult {
+	started := time.Now()
 	pinner, canPin := o.disp.(HostKeyPinner)
 	var hostPriv string
 	var sshHostPub ssh.PublicKey
@@ -585,6 +592,7 @@ func (o *Orchestrator) doForceProvision(ctx context.Context) forceResult {
 	inst, err := o.prov.Provision(ctx, spec)
 	if err != nil {
 		o.log.Error("force-provision", "err", err)
+		o.emit("worker_provision_failed", map[string]string{attrOperation: "provision", attrDurationMS: strconv.FormatInt(time.Since(started).Milliseconds(), 10)})
 		return forceResult{err: fmt.Errorf("provision: %w", err)}
 	}
 	o.pool.Put(&Node{
@@ -608,12 +616,13 @@ func (o *Orchestrator) doForceProvision(ctx context.Context) forceResult {
 	o.wg.Go(func() {
 		if err := o.disp.WaitReady(ctx, id, dialAddr); err != nil {
 			o.log.Error("force-provision worker readiness", "id", id, "err", err)
+			o.emit("worker_provision_failed", map[string]string{attrID: id, attrIP: ip, attrOperation: "wait_ready", attrDurationMS: strconv.FormatInt(time.Since(started).Milliseconds(), 10)})
 			o.markProvisionFailed(id, ip)
 			return
 		}
 		o.pool.SetState(id, StateIdle)
 		o.log.Info("force-provisioned worker ready", "id", id)
-		o.emit("worker_ready", map[string]string{attrID: id, attrIP: ip})
+		o.emit("worker_ready", map[string]string{attrID: id, attrIP: ip, attrDurationMS: strconv.FormatInt(time.Since(started).Milliseconds(), 10)})
 	})
 	return forceResult{instanceID: inst.ID}
 }
@@ -628,6 +637,7 @@ func (o *Orchestrator) reapZombieRunners(ctx context.Context) {
 	runners, err := o.jobs.ListRunners(ctx)
 	if err != nil {
 		o.log.Error("list runners", "err", err)
+		o.emit("reconcile_error", map[string]string{attrOperation: "list_runners"})
 		return
 	}
 	prefix := o.cfg.Tag + "-"
@@ -749,18 +759,19 @@ func (o *Orchestrator) dispatch(ctx context.Context, node Node, job forgejo.Wait
 	o.pool.SetJob(node.InstanceID, job.Handle)
 	o.emit("worker_busy", map[string]string{attrID: node.InstanceID, attrIP: node.IP, attrHandle: job.Handle})
 	o.wg.Go(func() {
+		started := time.Now()
 		defer func() {
 			o.pool.SetState(node.InstanceID, StateIdle)
 			o.pool.SetJob(node.InstanceID, "")
 			o.pool.Touch(node.InstanceID, o.now())
 			o.unmarkDispatching(job.Handle)
-			o.emit("worker_idle", map[string]string{attrID: node.InstanceID, attrIP: node.IP})
+			o.emit("worker_idle", map[string]string{attrID: node.InstanceID, attrIP: node.IP, attrDurationMS: strconv.FormatInt(time.Since(started).Milliseconds(), 10)})
 		}()
 		name := o.cfg.Tag + "-" + shortID()
 		reg, err := o.jobs.RegisterEphemeral(ctx, name, o.cfg.Labels)
 		if err != nil {
 			o.log.Error("register ephemeral runner", "handle", job.Handle, "err", err)
-			o.emit("job_failed", map[string]string{attrID: node.InstanceID, attrIP: node.IP, attrHandle: job.Handle})
+			o.emit("job_failed", map[string]string{attrID: node.InstanceID, attrIP: node.IP, attrHandle: job.Handle, attrOperation: "register_runner", attrDurationMS: strconv.FormatInt(time.Since(started).Milliseconds(), 10)})
 			return
 		}
 		o.addActive(reg.UUID)
@@ -768,11 +779,11 @@ func (o *Orchestrator) dispatch(ctx context.Context, node Node, job forgejo.Wait
 		o.emit("job_dispatched", map[string]string{attrID: node.InstanceID, attrIP: node.IP, attrHandle: job.Handle, attrRunnerUUID: reg.UUID})
 		if err := o.disp.RunJob(ctx, node.InstanceID, o.addrFor(&node), reg, job); err != nil {
 			o.log.Error("run job", "handle", job.Handle, "ip", node.IP, "err", err)
-			o.emit("job_failed", map[string]string{attrID: node.InstanceID, attrIP: node.IP, attrHandle: job.Handle, attrRunnerUUID: reg.UUID})
+			o.emit("job_failed", map[string]string{attrID: node.InstanceID, attrIP: node.IP, attrHandle: job.Handle, attrRunnerUUID: reg.UUID, attrOperation: "run_job", attrDurationMS: strconv.FormatInt(time.Since(started).Milliseconds(), 10)})
 			return
 		}
 		o.log.Info("job complete", "handle", job.Handle, "ip", node.IP)
-		o.emit("job_complete", map[string]string{attrID: node.InstanceID, attrIP: node.IP, attrHandle: job.Handle})
+		o.emit("job_complete", map[string]string{attrID: node.InstanceID, attrIP: node.IP, attrHandle: job.Handle, attrDurationMS: strconv.FormatInt(time.Since(started).Milliseconds(), 10)})
 	})
 	return true
 }
@@ -784,6 +795,7 @@ func (o *Orchestrator) provisionOne(ctx context.Context) {
 	ctx = o.jobContext(ctx)
 	o.incPending()
 	o.wg.Go(func() {
+		started := time.Now()
 		// When the dispatcher can pre-pin host keys, generate a fresh ed25519 SSH
 		// host key per VM and inject its private half via cloud-init so the worker
 		// presents exactly this key; the public half is pinned after Provision so
@@ -823,6 +835,7 @@ func (o *Orchestrator) provisionOne(ctx context.Context) {
 		inst, err := o.prov.Provision(ctx, spec)
 		if err != nil {
 			o.log.Error("provision", "err", err)
+			o.emit("worker_provision_failed", map[string]string{attrOperation: "provision", attrDurationMS: strconv.FormatInt(time.Since(started).Milliseconds(), 10)})
 			o.decPending()
 			return
 		}
@@ -845,6 +858,7 @@ func (o *Orchestrator) provisionOne(ctx context.Context) {
 
 		if err := o.disp.WaitReady(ctx, inst.ID, o.addrForInstance(inst.IPv4, inst.VPCIPv4)); err != nil {
 			o.log.Error("worker readiness", "id", inst.ID, "err", err)
+			o.emit("worker_provision_failed", map[string]string{attrID: inst.ID, attrIP: inst.IPv4, attrOperation: "wait_ready", attrDurationMS: strconv.FormatInt(time.Since(started).Milliseconds(), 10)})
 			// A failed readiness probe must not strand a provisioning node:
 			// provisioning nodes are intentionally excluded from normal teardown
 			// and would otherwise consume MaxScale forever. Mark it removing and
@@ -854,7 +868,7 @@ func (o *Orchestrator) provisionOne(ctx context.Context) {
 		}
 		o.pool.SetState(inst.ID, StateIdle)
 		o.log.Info("worker ready", "id", inst.ID)
-		o.emit("worker_ready", map[string]string{attrID: inst.ID, attrIP: inst.IPv4})
+		o.emit("worker_ready", map[string]string{attrID: inst.ID, attrIP: inst.IPv4, attrDurationMS: strconv.FormatInt(time.Since(started).Milliseconds(), 10)})
 	})
 }
 
@@ -867,15 +881,17 @@ func (o *Orchestrator) markProvisionFailed(id, ip string) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
+	started := time.Now()
 	if err := o.prov.Destroy(ctx, id); err != nil {
 		o.releaseDestroy(id)
 		o.log.Error("destroy failed worker", "id", id, "err", err)
+		o.emit("worker_destroy_failed", map[string]string{attrID: id, attrIP: ip, attrOperation: "destroy", attrDurationMS: strconv.FormatInt(time.Since(started).Milliseconds(), 10)})
 		return // StateRemoving makes the next reconcile retry it.
 	}
 	o.releaseDestroy(id)
 	o.pool.Delete(id)
 	o.log.Info("destroyed failed worker", "id", id, "ip", ip)
-	o.emit("worker_reaped", map[string]string{attrID: id, attrIP: ip})
+	o.emit("worker_reaped", map[string]string{attrID: id, attrIP: ip, attrDurationMS: strconv.FormatInt(time.Since(started).Milliseconds(), 10)})
 }
 
 // applyTeardown destroys idle nodes the billing policy says are due. Returns
@@ -914,15 +930,17 @@ func (o *Orchestrator) startDestroy(ctx context.Context, n Node) bool {
 		return false
 	}
 	o.wg.Go(func() {
+		started := time.Now()
 		defer o.releaseDestroy(id)
 		if err := o.prov.Destroy(ctx, id); err != nil {
 			o.log.Error("destroy", "id", id, "err", err)
+			o.emit("worker_destroy_failed", map[string]string{attrID: id, attrIP: ip, attrOperation: "destroy", attrDurationMS: strconv.FormatInt(time.Since(started).Milliseconds(), 10)})
 			o.pool.SetState(id, StateRemoving) // retry next tick
 			return
 		}
 		o.pool.Delete(id)
 		o.log.Info("destroyed worker", "id", id, "ip", ip)
-		o.emit("worker_reaped", map[string]string{attrID: id, attrIP: ip})
+		o.emit("worker_reaped", map[string]string{attrID: id, attrIP: ip, attrDurationMS: strconv.FormatInt(time.Since(started).Milliseconds(), 10)})
 	})
 	return true
 }
