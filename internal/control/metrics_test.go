@@ -98,7 +98,8 @@ func TestMetrics_EventTeeRecordsDurations(t *testing.T) {
 	be.SetCacheStatus(func(context.Context) *control.CacheStatus { return nil })
 	bus := controlevents.New()
 	be.SetSubscribe(bus.Subscribe)
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	var listenConfig net.ListenConfig
+	ln, err := listenConfig.Listen(context.Background(), "tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -126,7 +127,8 @@ func TestMetrics_EventTeeRecordsDurations(t *testing.T) {
 	bus.Publish(controlevents.Event{Type: "job_complete", Attrs: map[string]string{"duration_ms": "12"}})
 	var body string
 	for deadline := time.Now().Add(time.Second); ; {
-		resp, reqErr := client.Get(base + "/metrics")
+		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, base+"/metrics", nil)
+		resp, reqErr := client.Do(req)
 		if reqErr == nil {
 			b, _ := io.ReadAll(resp.Body)
 			_ = resp.Body.Close()
@@ -274,7 +276,7 @@ func TestMetrics_CacheStatusConcurrentScrapesRefreshOnce(t *testing.T) {
 	hs, _ := newTestServer(t, be)
 	const scrapes = 8
 	done := make(chan struct{}, scrapes)
-	for i := 0; i < scrapes; i++ {
+	for range scrapes {
 		go func() {
 			_ = scrapeMetrics(t, hs.Client(), hs.URL)
 			done <- struct{}{}
@@ -285,7 +287,7 @@ func TestMetrics_CacheStatusConcurrentScrapesRefreshOnce(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("cache refresh did not start")
 	}
-	for i := 0; i < scrapes; i++ {
+	for range scrapes {
 		select {
 		case <-done:
 		case <-time.After(200 * time.Millisecond):

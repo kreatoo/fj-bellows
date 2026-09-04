@@ -55,6 +55,7 @@ type metrics struct {
 
 var operationDurationBuckets = []float64{0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, 300, 900}
 
+//nolint:funlen // metric registration is intentionally centralized for one registry.
 func newMetrics(backend Backend, now func() time.Time) *metrics {
 	reg := prometheus.NewRegistry()
 
@@ -264,6 +265,8 @@ func rpcCode(err error) string {
 // per-type counter for each event. Returns when ctx is cancelled, or when
 // the bus drops the subscriber (logged; shouldn't happen for the small
 // fan-out we generate here).
+//
+//nolint:gocyclo // event types each update a deliberately small set of metrics.
 func (m *metrics) runEventTee(ctx context.Context, backend Backend, log *slog.Logger) {
 	ch, cancel := backend.Subscribe()
 	defer cancel()
@@ -284,7 +287,7 @@ func (m *metrics) runEventTee(ctx context.Context, backend Backend, log *slog.Lo
 				m.reconcileTicksTotal.Inc()
 				observeDuration(m.reconcileDuration, ev.Attrs["duration_ms"])
 				if n, err := strconv.Atoi(ev.Attrs["errors"]); err == nil {
-					for i := 0; i < n; i++ {
+					for range n {
 						m.reconcileErrorsTotal.Inc()
 					}
 				}
@@ -369,10 +372,7 @@ func (m *metrics) httpMiddleware(next http.Handler) http.Handler {
 		started := time.Now()
 		sw := &metricsResponseWriter{ResponseWriter: w}
 		next.ServeHTTP(sw, r)
-		method := r.Method
-		if method == "" {
-			method = "other"
-		}
+		method := metricMethod(r.Method)
 		route := metricRoute(r.URL.Path)
 		m.httpDuration.WithLabelValues(method, route).Observe(time.Since(started).Seconds())
 		m.httpRequests.WithLabelValues(method, route, statusClass(sw.status)).Inc()
@@ -386,18 +386,21 @@ type metricsResponseWriter struct {
 }
 
 func (w *metricsResponseWriter) WriteHeader(status int) {
-	if !w.wroteHeader {
-		w.status = status
-		w.wroteHeader = true
+	if w.wroteHeader {
+		return
 	}
+	w.status = status
+	w.wroteHeader = true
 	w.ResponseWriter.WriteHeader(status)
 }
+
 func (w *metricsResponseWriter) Write(p []byte) (int, error) {
 	if !w.wroteHeader {
 		w.WriteHeader(http.StatusOK)
 	}
 	return w.ResponseWriter.Write(p)
 }
+
 func (w *metricsResponseWriter) Flush() {
 	if !w.wroteHeader {
 		w.WriteHeader(http.StatusOK)
