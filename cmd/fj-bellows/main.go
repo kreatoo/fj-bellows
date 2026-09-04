@@ -296,6 +296,11 @@ type controlBackend struct {
 	cfg      *config.Config
 }
 
+func (b *controlBackend) PendingProvisions() int { return b.o.PendingProvisions() }
+func (b *controlBackend) ActiveJobs() int        { return b.o.ActiveJobs() }
+func (b *controlBackend) DispatchingJobs() int   { return b.o.DispatchingJobs() }
+func (b *controlBackend) Destroying() int        { return b.o.Destroying() }
+
 func (b *controlBackend) Health(ctx context.Context) control.HealthStatus {
 	s := b.o.Health(ctx)
 	return control.HealthStatus{

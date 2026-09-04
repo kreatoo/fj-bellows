@@ -759,7 +759,8 @@ func (o *Orchestrator) dispatch(ctx context.Context, node Node, job forgejo.Wait
 		name := o.cfg.Tag + "-" + shortID()
 		reg, err := o.jobs.RegisterEphemeral(ctx, name, o.cfg.Labels)
 		if err != nil {
-			o.log.Error("register ephemeral runner", "err", err)
+			o.log.Error("register ephemeral runner", "handle", job.Handle, "err", err)
+			o.emit("job_failed", map[string]string{attrID: node.InstanceID, attrIP: node.IP, attrHandle: job.Handle})
 			return
 		}
 		o.addActive(reg.UUID)
@@ -767,6 +768,7 @@ func (o *Orchestrator) dispatch(ctx context.Context, node Node, job forgejo.Wait
 		o.emit("job_dispatched", map[string]string{attrID: node.InstanceID, attrIP: node.IP, attrHandle: job.Handle, attrRunnerUUID: reg.UUID})
 		if err := o.disp.RunJob(ctx, node.InstanceID, o.addrFor(&node), reg, job); err != nil {
 			o.log.Error("run job", "handle", job.Handle, "ip", node.IP, "err", err)
+			o.emit("job_failed", map[string]string{attrID: node.InstanceID, attrIP: node.IP, attrHandle: job.Handle, attrRunnerUUID: reg.UUID})
 			return
 		}
 		o.log.Info("job complete", "handle", job.Handle, "ip", node.IP)
@@ -963,6 +965,33 @@ func (o *Orchestrator) decPending() {
 		o.pending--
 	}
 	o.mu.Unlock()
+}
+
+// PendingProvisions reports cloud create calls that have not yet entered the
+// pool. It is intentionally cheap and lock-protected for Prometheus scrapes.
+func (o *Orchestrator) PendingProvisions() int {
+	return o.pendingCount()
+}
+
+// ActiveJobs reports jobs currently assigned to a worker.
+func (o *Orchestrator) ActiveJobs() int {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return len(o.active)
+}
+
+// DispatchingJobs reports job handles currently in the dispatch path.
+func (o *Orchestrator) DispatchingJobs() int {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return len(o.dispatching)
+}
+
+// Destroying reports provider Destroy calls currently in flight.
+func (o *Orchestrator) Destroying() int {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return len(o.destroying)
 }
 
 func (o *Orchestrator) pendingCount() int {

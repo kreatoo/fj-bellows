@@ -39,6 +39,10 @@ func TestMetrics_ExposesPulledGauges(t *testing.T) {
 	mustContain(t, body, `fjb_workers{state="busy"} 2`)
 	mustContain(t, body, `fjb_workers{state="provisioning"} 0`) // pre-seeded
 	mustContain(t, body, `fjb_cache_present 1`)
+	mustContain(t, body, `fjb_last_provider_list_age_seconds -1`)
+	mustContain(t, body, `fjb_last_forgejo_poll_age_seconds -1`)
+	mustContain(t, body, `fjb_paused 0`)
+	mustContain(t, body, `fjb_pending_provisions 0`)
 }
 
 func TestMetrics_LastTickAge_NegativeBeforeFirstTick(t *testing.T) {

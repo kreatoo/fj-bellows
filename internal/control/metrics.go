@@ -4,11 +4,22 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
+
+// MetricsStatsProvider is an optional backend extension exposing cheap
+// in-memory lifecycle counters. Keeping it optional preserves compatibility
+// with lightweight control-plane fakes and third-party backends.
+type MetricsStatsProvider interface {
+	PendingProvisions() int
+	ActiveJobs() int
+	DispatchingJobs() int
+	Destroying() int
+}
 
 // metrics owns the per-server Prometheus registry plus an event-bus
 // subscriber that tees events into a counter. Pulled gauges query the
@@ -18,8 +29,11 @@ import (
 // The registry is server-local (not the package's default) so unit tests
 // running in parallel don't collide on the global registry.
 type metrics struct {
-	reg         *prometheus.Registry
-	eventsTotal *prometheus.CounterVec
+	reg                  *prometheus.Registry
+	eventsTotal          *prometheus.CounterVec
+	reconcileTicksTotal  prometheus.Counter
+	reconcileErrorsTotal prometheus.Counter
+	jobsFailedTotal      prometheus.Counter
 }
 
 func newMetrics(backend Backend, now func() time.Time) *metrics {
@@ -46,10 +60,31 @@ func newMetrics(backend Backend, now func() time.Time) *metrics {
 		Help: "Seconds since the orchestrator's most recent reconcile completed; -1 if never.",
 	}, func() float64 {
 		s := backend.Health(context.Background())
-		if s.LastTickAt.IsZero() {
-			return -1
+		return healthAge(now, s.LastTickAt)
+	}))
+
+	reg.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+		Name: "fjb_last_provider_list_age_seconds",
+		Help: "Seconds since the provider instance list last succeeded; -1 if never.",
+	}, func() float64 {
+		return healthAge(now, backend.Health(context.Background()).LastProviderListAt)
+	}))
+
+	reg.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+		Name: "fjb_last_forgejo_poll_age_seconds",
+		Help: "Seconds since the Forgejo waiting-job poll last succeeded; -1 if never.",
+	}, func() float64 {
+		return healthAge(now, backend.Health(context.Background()).LastForgejoPollAt)
+	}))
+
+	reg.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+		Name: "fjb_paused",
+		Help: "1 if automatic reconciliation is paused; 0 otherwise.",
+	}, func() float64 {
+		if backend.Health(context.Background()).Paused {
+			return 1
 		}
-		return now().Sub(s.LastTickAt).Seconds()
+		return 0
 	}))
 
 	reg.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{
@@ -63,11 +98,43 @@ func newMetrics(backend Backend, now func() time.Time) *metrics {
 		return 0
 	}))
 
+	if stats, ok := backend.(MetricsStatsProvider); ok {
+		reg.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+			Name: "fjb_pending_provisions",
+			Help: "Provision operations currently in flight.",
+		}, func() float64 { return float64(stats.PendingProvisions()) }))
+		reg.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+			Name: "fjb_active_jobs",
+			Help: "Jobs currently assigned to workers.",
+		}, func() float64 { return float64(stats.ActiveJobs()) }))
+		reg.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+			Name: "fjb_dispatching_jobs",
+			Help: "Job handles currently being dispatched.",
+		}, func() float64 { return float64(stats.DispatchingJobs()) }))
+		reg.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+			Name: "fjb_destroying_workers",
+			Help: "Worker destroy operations currently in flight.",
+		}, func() float64 { return float64(stats.Destroying()) }))
+	}
+
 	eventsTotal := prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "fjb_events_total",
 		Help: "State-transition events emitted by the orchestrator, by type.",
 	}, []string{"type"})
 	reg.MustRegister(eventsTotal)
+	reconcileTicksTotal := prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "fjb_reconcile_ticks_total",
+		Help: "Completed reconciliation passes.",
+	})
+	reconcileErrorsTotal := prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "fjb_reconcile_errors_total",
+		Help: "Top-level reconciliation steps that failed.",
+	})
+	jobsFailedTotal := prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "fjb_jobs_failed_total",
+		Help: "Jobs whose runner registration or execution failed.",
+	})
+	reg.MustRegister(reconcileTicksTotal, reconcileErrorsTotal, jobsFailedTotal)
 	// Pre-initialize the well-known event types so a fresh-start scrape
 	// shows zero rows instead of omitting the series entirely (Prom only
 	// emits TYPE/HELP for metrics with at least one observed labelset).
@@ -76,8 +143,11 @@ func newMetrics(backend Backend, now func() time.Time) *metrics {
 	}
 
 	return &metrics{
-		reg:         reg,
-		eventsTotal: eventsTotal,
+		reg:                  reg,
+		eventsTotal:          eventsTotal,
+		reconcileTicksTotal:  reconcileTicksTotal,
+		reconcileErrorsTotal: reconcileErrorsTotal,
+		jobsFailedTotal:      jobsFailedTotal,
 	}
 }
 
@@ -100,8 +170,32 @@ func (m *metrics) runEventTee(ctx context.Context, backend Backend, log *slog.Lo
 				return
 			}
 			m.eventsTotal.WithLabelValues(ev.Type).Inc()
+			switch ev.Type {
+			case "reconcile_tick":
+				m.reconcileTicksTotal.Inc()
+				if n, err := strconv.Atoi(ev.Attrs["errors"]); err == nil {
+					for i := 0; i < n; i++ {
+						m.reconcileErrorsTotal.Inc()
+					}
+				}
+			case "job_failed":
+				m.jobsFailedTotal.Inc()
+			}
 		}
 	}
+}
+
+func healthAge(now func() time.Time, at time.Time) float64 {
+	if at.IsZero() {
+		return -1
+	}
+	age := now().Sub(at).Seconds()
+	// A clock adjustment should not make a future success look infinitely
+	// healthy; expose it as zero age while Health remains authoritative.
+	if age < 0 {
+		return 0
+	}
+	return age
 }
 
 func (m *metrics) handler() http.Handler {
@@ -164,5 +258,8 @@ var knownEventTypes = []string{
 	"job_complete",
 	"zombie_reaped",
 	"reconcile_tick",
+	"job_failed",
+	"reconciler_paused",
+	"reconciler_resumed",
 	"stream_opened",
 }

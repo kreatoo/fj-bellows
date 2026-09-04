@@ -12,10 +12,31 @@ multiplexes three protocols on a single mux:
   (proto in `proto/`, generated code in `gen/`).
 - **`/healthz`** — plain HTTP shim for k8s-style liveness/readiness probes and
   `curl --fail`. Returns 200 + tiny JSON when healthy, 503 otherwise.
-- **`/metrics`** — Prometheus exposition (added in a later PR).
+- **`/metrics`** — Prometheus exposition for worker state, health freshness,
+  lifecycle gauges, cache presence, and event counters.
 
 HTTP/2 cleartext (`UnencryptedHTTP2`) is enabled so gRPC clients work over the
 loopback-bound socket without TLS.
+
+## Prometheus scraping
+
+`/metrics` is available on the control listener (default `127.0.0.1:9876`)
+and is intentionally unauthenticated so Prometheus can scrape it. For a
+Prometheus server on the same host:
+
+```yaml
+scrape_configs:
+  - job_name: fj-bellows
+    static_configs:
+      - targets: ["127.0.0.1:9876"]
+```
+
+Useful series include `fjb_workers{state=...}`, `fjb_pending_provisions`,
+`fjb_active_jobs`, `fjb_destroying_workers`, `fjb_healthy`,
+`fjb_last_provider_list_age_seconds`, `fjb_last_forgejo_poll_age_seconds`,
+and `fjb_events_total{type=...}`. Keep the listener loopback-bound or protect
+non-loopback access with network policy; the endpoint intentionally has no
+bearer-token requirement for scraper compatibility.
 
 ## v1 scope
 

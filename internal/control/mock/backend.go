@@ -70,6 +70,12 @@ func (b *Backend) SetCacheStatus(fn func(ctx context.Context) *control.CacheStat
 	b.mu.Unlock()
 }
 
+// Optional metrics lifecycle values; tests can use zero defaults.
+func (b *Backend) PendingProvisions() int { return 0 }
+func (b *Backend) ActiveJobs() int        { return 0 }
+func (b *Backend) DispatchingJobs() int   { return 0 }
+func (b *Backend) Destroying() int        { return 0 }
+
 // Health implements control.Backend.
 func (b *Backend) Health(ctx context.Context) control.HealthStatus {
 	b.mu.Lock()
