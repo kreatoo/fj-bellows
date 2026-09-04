@@ -279,6 +279,38 @@ func TestReconcileTearsDownAllDueIdleNodes(t *testing.T) {
 	waitFor(t, "pool drained", func() bool { return o.pool.Len() == 0 })
 }
 
+// TestTeardownUsesWorkContext ensures the bounded reconcile context cannot
+// cancel an asynchronously scheduled Destroy as soon as the pass returns.
+func TestTeardownUsesWorkContext(t *testing.T) {
+	created := time.Now().Add(-time.Hour)
+	destroyed := make(chan error, 1)
+	prov := &pmock.Provider{
+		ListFn: func(context.Context, string) ([]provider.Instance, error) {
+			return []provider.Instance{{ID: "idle", CreatedAt: created}}, nil
+		},
+		DestroyFn: func(ctx context.Context, _ string) error {
+			destroyed <- ctx.Err()
+			return nil
+		},
+	}
+	cfg := baseConfig()
+	cfg.Teardown.IdleTimeout = time.Second
+	o := New(cfg, prov, &omock.JobSource{}, &omock.Dispatcher{}, nil)
+	o.pool.Put(&Node{InstanceID: "idle", State: StateIdle, CreatedAt: created, LastBusy: created})
+	o.workCtx = context.Background()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	o.Reconcile(ctx)
+	select {
+	case err := <-destroyed:
+		if err != nil {
+			t.Fatalf("Destroy context canceled: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Destroy was not scheduled")
+	}
+}
+
 // TestPendingPreventsOverProvision covers the pending counter: with provisions
 // blocked in flight, a second reconcile must not exceed MaxScale because pending
 // is incremented synchronously before each provision goroutine starts.

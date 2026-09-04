@@ -925,6 +925,10 @@ func (o *Orchestrator) applyTeardown(ctx context.Context) int {
 }
 
 func (o *Orchestrator) startDestroy(ctx context.Context, n Node) bool {
+	// Reconcile passes use a short-lived bounded context, but destruction is
+	// asynchronous. Use the shutdown-scoped work context so the pass's
+	// cancellation does not abort every Destroy immediately after scheduling.
+	ctx = o.jobContext(ctx)
 	id, ip := n.InstanceID, n.IP
 	if !o.claimDestroy(id) {
 		return false
