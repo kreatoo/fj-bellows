@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"errors"
 	"strconv"
 	"strings"
 	"sync"
@@ -802,4 +803,15 @@ func TestReconcileSubtractsProvisioningFromNeed(t *testing.T) {
 	if got := prov.ProvisionCount(); got != 2 {
 		t.Errorf("ProvisionCount = %d, want 2 (5 jobs - 1 idle - 2 provisioning)", got)
 	}
+}
+
+func TestReadinessFailureDestroysAndRemovesWorker(t *testing.T) {
+	prov := &pmock.Provider{ProvisionFn: func(context.Context, provider.Spec) (provider.Instance, error) {
+		return provider.Instance{ID: "failed-1", IPv4: "203.0.113.10", CreatedAt: time.Now()}, nil
+	}}
+	jobs := &omock.JobSource{WaitingJobsFn: func(context.Context) ([]forgejo.WaitingJob, error) { return nUbuntuJobs(1), nil }}
+	disp := &omock.Dispatcher{WaitReadyFn: func(context.Context, string, string) error { return errors.New("bootstrap failed") }}
+	o := New(baseConfig(), prov, jobs, disp, nil)
+	o.Reconcile(context.Background())
+	waitFor(t, "failed worker cleanup", func() bool { return prov.DestroyCount() == 1 && o.pool.Len() == 0 })
 }

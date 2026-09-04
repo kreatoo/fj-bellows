@@ -6,6 +6,7 @@ package digitalocean
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/digitalocean/godo"
@@ -21,9 +22,14 @@ type DigitalOcean struct {
 	client               doClient
 	newClient            func(token string) doClient
 	firewallID           string
+	firewallMu           sync.Mutex
+	firewallLastRefresh  time.Time
 	pollInterval         time.Duration
 	resolvedAllowInbound []string
 	resolveAuto          func(context.Context) ([]string, error)
+	sshKeyMu             sync.Mutex
+	sshKeyID             int
+	sshKeyValue          string
 }
 
 func init() {
@@ -39,6 +45,14 @@ func (d *DigitalOcean) Configure(ctx context.Context, tag string, node yaml.Node
 	if err := cfg.validate(); err != nil {
 		return err
 	}
+	// Configure may be called again by tests or a future reload path. Do not
+	// retain a firewall identity or resolved ingress addresses from another
+	// deployment/configuration.
+	d.firewallID = ""
+	d.firewallLastRefresh = time.Time{}
+	d.resolvedAllowInbound = nil
+	d.sshKeyID = 0
+	d.sshKeyValue = ""
 	d.cfg = cfg
 	d.tag = tag
 	if d.newClient == nil {
@@ -61,7 +75,11 @@ func (d *DigitalOcean) BillingModel() provider.BillingModel {
 
 func newGodoClient(token string) doClient {
 	tsrc := oauth2.StaticTokenSource(&oauth2.Token{AccessToken: token})
-	cl, err := godo.New(oauth2.NewClient(context.Background(), tsrc))
+	hc := oauth2.NewClient(context.Background(), tsrc)
+	// godo otherwise inherits an http.Client with no response deadline. Keep a
+	// stalled DigitalOcean endpoint from wedging reconciliation forever.
+	hc.Timeout = 30 * time.Second
+	cl, err := godo.New(hc)
 	if err != nil {
 		// godo.New only errors on nil http.Client; we always supply one.
 		panic(fmt.Sprintf("digitalocean: create godo client: %v", err))

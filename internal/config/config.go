@@ -179,6 +179,12 @@ func (c *Config) validate() error {
 	if len(missing) > 0 {
 		return fmt.Errorf("config: missing required fields: %s", strings.Join(missing, ", "))
 	}
+	if c.Poll.Interval <= 0 {
+		return fmt.Errorf("config: poll.interval must be > 0")
+	}
+	if c.Poll.IdleTimeout < 0 || c.Poll.HourMargin < 0 || c.Poll.BillingHour < 0 {
+		return fmt.Errorf("config: poll durations must not be negative")
+	}
 	if err := c.Transport.validate(); err != nil {
 		return fmt.Errorf("config: %w", err)
 	}

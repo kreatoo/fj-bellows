@@ -58,7 +58,7 @@ docker run -d --name fjb-integ-forgejo \
   -e FORGEJO__server__DOMAIN=localhost \
   -e FORGEJO__actions__ENABLED=true \
   -p 3001:3000 \
-  codeberg.org/forgejo/forgejo:12
+  codeberg.org/forgejo/forgejo:15
 
 # 3. Seed it.
 export FORGEJO_URL=http://localhost:3001

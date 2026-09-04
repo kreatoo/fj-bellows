@@ -127,6 +127,7 @@ type Orchestrator struct {
 	pending     int                 // in-flight provisions not yet in the pool
 	dispatching map[string]struct{} // job handles currently being served
 	active      map[string]struct{} // runner UUIDs we registered and still expect
+	destroying  map[string]struct{} // provider Destroy calls currently in flight
 	now         func() time.Time    // injectable clock for tests
 
 	// Freshness timestamps consumed by the control plane's Health endpoint.
@@ -144,6 +145,9 @@ type Orchestrator struct {
 	// listenerToken is the registration token for the listener runner, used
 	// to authenticate FetchTask heartbeat calls.
 	listenerToken string
+	// workCtx is the shutdown-independent context used by running jobs. The
+	// reconcile/API context is intentionally shutdown-linked and time-bounded.
+	workCtx context.Context
 
 	// reapSeen tracks runner UUIDs that looked like zombies last tick; only
 	// reaped after two consecutive sightings so a just-registered runner is not
@@ -172,6 +176,7 @@ func New(cfg Config, prov provider.Provider, jobs JobSource, disp Dispatcher, lo
 		pollReset:   make(chan time.Duration, 1),
 		dispatching: map[string]struct{}{},
 		active:      map[string]struct{}{},
+		destroying:  map[string]struct{}{},
 		reapSeen:    map[string]struct{}{},
 		now:         time.Now,
 	}
@@ -186,11 +191,12 @@ func New(cfg Config, prov provider.Provider, jobs JobSource, disp Dispatcher, lo
 func (o *Orchestrator) Run(ctx context.Context) error {
 	jobCtx, cancelJobs := context.WithCancel(context.Background())
 	defer cancelJobs()
+	o.workCtx = jobCtx
 
 	// Register (or refresh) the persistent listener runner so Forgejo's
 	// cron scheduler creates scheduled-workflow runs even when no ephemeral
 	// runner is alive. A timeout prevents this from blocking startup.
-	listenerCtx, cancelListener := context.WithTimeout(context.Background(), 10*time.Second)
+	listenerCtx, cancelListener := context.WithTimeout(ctx, 10*time.Second)
 	o.ensureListenerRunner(listenerCtx)
 	cancelListener()
 
@@ -207,7 +213,7 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 
 	t := time.NewTicker(o.cfg.PollInterval)
 	defer t.Stop()
-	o.Reconcile(jobCtx)
+	o.reconcileBounded(ctx)
 	for {
 		select {
 		case <-ctx.Done():
@@ -224,9 +230,9 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 			if o.paused.Load() {
 				continue
 			}
-			o.Reconcile(jobCtx)
+			o.reconcileBounded(ctx)
 		case req := <-o.kick:
-			o.serveKick(jobCtx, req)
+			o.serveKick(ctx, req)
 		case d := <-o.pollReset:
 			// ApplyHotConfig changed PollInterval. Recreate the ticker so
 			// the new cadence takes effect on the next boundary; the
@@ -319,6 +325,7 @@ const (
 // drive an out-of-band action from the Run goroutine. Exactly one of
 // reconcile or force is populated based on kind.
 type kickReq struct {
+	ctx        context.Context // caller context; bounds/cancels out-of-band work
 	kind       kickKind
 	instanceID string // populated for kickForceReap
 	reconcile  chan ReconcileResult
@@ -374,17 +381,37 @@ func (o *Orchestrator) Reconcile(ctx context.Context) ReconcileResult {
 	return r
 }
 
+func (o *Orchestrator) reconcileBounded(ctx context.Context) ReconcileResult {
+	callCtx, cancel := context.WithTimeout(ctx, 90*time.Second)
+	defer cancel()
+	return o.Reconcile(callCtx)
+}
+
 // serveKick dispatches one out-of-band request from the Run-goroutine. The
 // single-writer property of the reconcile loop is preserved because every
 // pool mutation here happens on the same goroutine as the ticker.
-func (o *Orchestrator) serveKick(jobCtx context.Context, req kickReq) {
+func (o *Orchestrator) serveKick(runCtx context.Context, req kickReq) {
+	requestCtx := req.ctx
+	if requestCtx == nil {
+		requestCtx = runCtx
+	}
 	switch req.kind {
 	case kickReconcile:
-		req.reconcile <- o.Reconcile(jobCtx)
+		result := o.reconcileBounded(requestCtx)
+		select {
+		case req.reconcile <- result:
+		case <-requestCtx.Done():
+		}
 	case kickForceReap:
-		req.force <- forceResult{err: o.doForceReap(jobCtx, req.instanceID)}
+		select {
+		case req.force <- forceResult{err: o.doForceReap(requestCtx, req.instanceID)}:
+		case <-requestCtx.Done():
+		}
 	case kickForceProvision:
-		req.force <- o.doForceProvision(jobCtx)
+		select {
+		case req.force <- o.doForceProvision(requestCtx):
+		case <-requestCtx.Done():
+		}
 	default:
 		// Unreachable in practice; keep the runtime defensive so a future
 		// kind added without a case here can't silently wedge the caller.
@@ -411,7 +438,7 @@ func (o *Orchestrator) ForceReap(ctx context.Context, instanceID string) error {
 		return errors.New("orchestrator not running (no kick channel)")
 	}
 	resultCh := make(chan forceResult, 1)
-	req := kickReq{kind: kickForceReap, instanceID: instanceID, force: resultCh}
+	req := kickReq{ctx: ctx, kind: kickForceReap, instanceID: instanceID, force: resultCh}
 	select {
 	case o.kick <- req:
 	case <-ctx.Done():
@@ -435,7 +462,7 @@ func (o *Orchestrator) ForceProvision(ctx context.Context) (string, error) {
 		return "", errors.New("orchestrator not running (no kick channel)")
 	}
 	resultCh := make(chan forceResult, 1)
-	req := kickReq{kind: kickForceProvision, force: resultCh}
+	req := kickReq{ctx: ctx, kind: kickForceProvision, force: resultCh}
 	select {
 	case o.kick <- req:
 	case <-ctx.Done():
@@ -490,6 +517,15 @@ func (o *Orchestrator) doForceReap(ctx context.Context, instanceID string) error
 	if !ok {
 		return fmt.Errorf("instance %q not in pool", instanceID)
 	}
+	if n.State == StateBusy {
+		return fmt.Errorf("instance %q is busy; wait for the job to finish before reaping", instanceID)
+	}
+	// Claim the provider operation before changing state so a scheduled
+	// teardown cannot issue a concurrent DELETE for the same droplet.
+	if !o.claimDestroy(instanceID) {
+		return fmt.Errorf("instance %q destroy already in flight", instanceID)
+	}
+	defer o.releaseDestroy(instanceID)
 	// Force into StateRemoving so applyTeardown / dispatch concurrent paths
 	// won't act on this node. SetState returns false only when the node
 	// has been deleted between Get and SetState — treat that as "already
@@ -572,7 +608,8 @@ func (o *Orchestrator) doForceProvision(ctx context.Context) forceResult {
 	o.wg.Go(func() {
 		if err := o.disp.WaitReady(ctx, id, dialAddr); err != nil {
 			o.log.Error("force-provision worker readiness", "id", id, "err", err)
-			return // teardown / orphan sweep will reclaim it
+			o.markProvisionFailed(id, ip)
+			return
 		}
 		o.pool.SetState(id, StateIdle)
 		o.log.Info("force-provisioned worker ready", "id", id)
@@ -611,9 +648,9 @@ func (o *Orchestrator) reapZombieRunners(ctx context.Context) {
 		o.log.Info("reaped zombie runner", "uuid", r.UUID, "name", r.Name)
 		o.emit("zombie_reaped", map[string]string{attrUUID: r.UUID, attrName: r.Name})
 	}
-	// ListRunners reaching this point means the Forgejo call succeeded above;
-	// bump the freshness signal alongside WaitingJobs.
-	o.markForgejoPoll()
+	// Do not update LastForgejoPollAt here: this is a separate endpoint from
+	// WaitingJobs, and a healthy runner-list call must not mask a broken job
+	// queue in the health check.
 	o.reapSeen = seen
 }
 
@@ -704,6 +741,7 @@ func (o *Orchestrator) dispatchJobs(ctx context.Context, jobs []forgejo.WaitingJ
 // true when a goroutine was spawned (i.e. the handle wasn't already in
 // flight); the caller increments its dispatch counter on true.
 func (o *Orchestrator) dispatch(ctx context.Context, node Node, job forgejo.WaitingJob) bool {
+	ctx = o.jobContext(ctx)
 	if !o.markDispatching(job.Handle) {
 		return false
 	}
@@ -741,6 +779,7 @@ func (o *Orchestrator) dispatch(ctx context.Context, node Node, job forgejo.Wait
 // marks it Idle. It counts as pending until it lands in the pool so concurrent
 // reconciles do not over-provision.
 func (o *Orchestrator) provisionOne(ctx context.Context) {
+	ctx = o.jobContext(ctx)
 	o.incPending()
 	o.wg.Go(func() {
 		// When the dispatcher can pre-pin host keys, generate a fresh ed25519 SSH
@@ -804,12 +843,37 @@ func (o *Orchestrator) provisionOne(ctx context.Context) {
 
 		if err := o.disp.WaitReady(ctx, inst.ID, o.addrForInstance(inst.IPv4, inst.VPCIPv4)); err != nil {
 			o.log.Error("worker readiness", "id", inst.ID, "err", err)
-			return // leave it; teardown/orphan sweep will reclaim it
+			// A failed readiness probe must not strand a provisioning node:
+			// provisioning nodes are intentionally excluded from normal teardown
+			// and would otherwise consume MaxScale forever. Mark it removing and
+			// retry deletion on subsequent reconciles if the provider is flaky.
+			o.markProvisionFailed(inst.ID, inst.IPv4)
+			return
 		}
 		o.pool.SetState(inst.ID, StateIdle)
 		o.log.Info("worker ready", "id", inst.ID)
 		o.emit("worker_ready", map[string]string{attrID: inst.ID, attrIP: inst.IPv4})
 	})
+}
+
+// markProvisionFailed transitions a worker whose bootstrap/readiness check
+// failed into the normal removal path. Destruction uses a fresh bounded context
+// because the reconcile/job context may be cancelled during shutdown.
+func (o *Orchestrator) markProvisionFailed(id, ip string) {
+	if !o.pool.SetState(id, StateRemoving) || !o.claimDestroy(id) {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	if err := o.prov.Destroy(ctx, id); err != nil {
+		o.releaseDestroy(id)
+		o.log.Error("destroy failed worker", "id", id, "err", err)
+		return // StateRemoving makes the next reconcile retry it.
+	}
+	o.releaseDestroy(id)
+	o.pool.Delete(id)
+	o.log.Info("destroyed failed worker", "id", id, "ip", ip)
+	o.emit("worker_reaped", map[string]string{attrID: id, attrIP: ip})
 }
 
 // applyTeardown destroys idle nodes the billing policy says are due. Returns
@@ -818,6 +882,7 @@ func (o *Orchestrator) provisionOne(ctx context.Context) {
 func (o *Orchestrator) applyTeardown(ctx context.Context) int {
 	now := o.now()
 	reaped := 0
+	// Idle nodes follow the provider billing policy.
 	for _, n := range o.pool.ByState(StateIdle) {
 		if !o.cfg.Teardown.ShouldTeardown(n, now) {
 			continue
@@ -825,21 +890,65 @@ func (o *Orchestrator) applyTeardown(ctx context.Context) int {
 		if !o.pool.SetState(n.InstanceID, StateRemoving) {
 			continue
 		}
-		id := n.InstanceID
-		ip := n.IP
-		reaped++
-		o.wg.Go(func() {
-			if err := o.prov.Destroy(ctx, id); err != nil {
-				o.log.Error("destroy", "id", id, "err", err)
-				o.pool.SetState(id, StateIdle) // retry next tick
-				return
-			}
-			o.pool.Delete(id)
-			o.log.Info("destroyed idle node", "id", id)
-			o.emit("worker_reaped", map[string]string{attrID: id, attrIP: ip})
-		})
+		if o.startDestroy(ctx, n) {
+			reaped++
+		}
+	}
+	// Removing nodes are retries from a failed Destroy (including a failed
+	// readiness cleanup). They must not depend on the idle timer again.
+	for _, n := range o.pool.ByState(StateRemoving) {
+		// A concurrent caller may have already claimed this node; SetState is
+		// deliberately not used here because the state is already removing.
+		if o.startDestroy(ctx, n) {
+			reaped++
+		}
 	}
 	return reaped
+}
+
+func (o *Orchestrator) startDestroy(ctx context.Context, n Node) bool {
+	id, ip := n.InstanceID, n.IP
+	if !o.claimDestroy(id) {
+		return false
+	}
+	o.wg.Go(func() {
+		defer o.releaseDestroy(id)
+		if err := o.prov.Destroy(ctx, id); err != nil {
+			o.log.Error("destroy", "id", id, "err", err)
+			o.pool.SetState(id, StateRemoving) // retry next tick
+			return
+		}
+		o.pool.Delete(id)
+		o.log.Info("destroyed worker", "id", id, "ip", ip)
+		o.emit("worker_reaped", map[string]string{attrID: id, attrIP: ip})
+	})
+	return true
+}
+
+func (o *Orchestrator) claimDestroy(id string) bool {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if o.destroying == nil {
+		o.destroying = make(map[string]struct{})
+	}
+	if _, ok := o.destroying[id]; ok {
+		return false
+	}
+	o.destroying[id] = struct{}{}
+	return true
+}
+
+func (o *Orchestrator) releaseDestroy(id string) {
+	o.mu.Lock()
+	delete(o.destroying, id)
+	o.mu.Unlock()
+}
+
+func (o *Orchestrator) jobContext(fallback context.Context) context.Context {
+	if o.workCtx != nil {
+		return o.workCtx
+	}
+	return fallback
 }
 
 func (o *Orchestrator) incPending() {

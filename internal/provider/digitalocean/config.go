@@ -6,11 +6,11 @@ import (
 )
 
 type config struct {
-	Token    string                `yaml:"token"`
-	Region   string                `yaml:"region"`
-	Size     string                `yaml:"size"`
-	Image    string                `yaml:"image"`
-	Firewall firewallConfig        `yaml:"firewall"`
+	Token    string                 `yaml:"token"`
+	Region   string                 `yaml:"region"`
+	Size     string                 `yaml:"size"`
+	Image    string                 `yaml:"image"`
+	Firewall firewallConfig         `yaml:"firewall"`
 	Labels   map[string]labelConfig `yaml:"labels"`
 }
 
@@ -43,6 +43,14 @@ func (c config) validate() error {
 		}
 		if c.Image == "" {
 			return errors.New("digitalocean: provider_config missing: image (or use labels map)")
+		}
+	}
+	for label, lc := range c.Labels {
+		if lc.Size == "" && c.Size == "" {
+			return errors.New("digitalocean: label " + label + " missing size (and no global size configured)")
+		}
+		if lc.Image == "" && c.Image == "" {
+			return errors.New("digitalocean: label " + label + " missing image (and no global image configured)")
 		}
 	}
 	if len(c.Firewall.AllowInbound) == 0 {

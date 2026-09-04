@@ -5,8 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/digitalocean/godo"
 )
@@ -24,30 +26,78 @@ func firewallName(tag string) string {
 }
 
 func (d *DigitalOcean) ensureFirewall(ctx context.Context) error {
-	if d.firewallID != "" {
-		return nil
-	}
-	if len(d.resolvedAllowInbound) == 0 {
-		var err error
-		d.resolvedAllowInbound, err = resolveAllowInbound(ctx, d.cfg.Firewall.AllowInbound, d.resolveAuto)
+	d.firewallMu.Lock()
+	defer d.firewallMu.Unlock()
+
+	refresh := d.firewallLastRefresh.IsZero() || time.Since(d.firewallLastRefresh) >= d.cfg.Firewall.RefreshInterval
+	if d.firewallID != "" && !refresh {
+		// Verify ownership on each provisioning attempt. A firewall deleted
+		// out-of-band must never silently leave the next worker unprotected.
+		fws, err := d.client.ListFirewalls(ctx)
 		if err != nil {
+			return fmt.Errorf("digitalocean: verify firewall: %w", err)
+		}
+		for _, fw := range fws {
+			if fw.ID == d.firewallID && fw.Name == firewallName(d.tag) && hasString(fw.Tags, d.tag) {
+				return nil
+			}
+		}
+		d.firewallID = ""
+	}
+	if len(d.resolvedAllowInbound) == 0 || refresh {
+		resolved, err := resolveAllowInbound(ctx, d.cfg.Firewall.AllowInbound, d.resolveAuto)
+		if err != nil {
+			if d.firewallID != "" {
+				// Keep the last-known-good ingress rule during a transient
+				// public-IP probe failure; a working deployment should not
+				// lose SSH access just because icanhazip is unavailable.
+				slog.Warn("digitalocean: firewall ingress refresh failed; keeping previous rules", "err", err)
+				return nil
+			}
 			return fmt.Errorf("digitalocean: resolve allow_inbound: %w", err)
 		}
+		d.resolvedAllowInbound = resolved
 	}
+
 	fws, err := d.client.ListFirewalls(ctx)
 	if err != nil {
 		return fmt.Errorf("digitalocean: list firewalls: %w", err)
 	}
 	name := firewallName(d.tag)
+	if d.firewallID != "" {
+		found := false
+		for _, fw := range fws {
+			if fw.ID == d.firewallID && fw.Name == name && hasString(fw.Tags, d.tag) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			// It was deleted outside fj-bellows; recreate it rather than
+			// silently provisioning unprotected workers.
+			d.firewallID = ""
+		}
+	}
+	if d.firewallID != "" {
+		if err := d.updateFirewall(ctx); err != nil {
+			return err
+		}
+		d.firewallLastRefresh = time.Now()
+		return nil
+	}
 	for _, fw := range fws {
 		if fw.Name == name && hasString(fw.Tags, d.tag) {
 			d.firewallID = fw.ID
-			return d.updateFirewall(ctx)
+			if err := d.updateFirewall(ctx); err != nil {
+				return err
+			}
+			d.firewallLastRefresh = time.Now()
+			return nil
 		}
 	}
 	if err := d.client.CreateTag(ctx, d.tag); err != nil {
 		var errResp *godo.ErrorResponse
-		if errors.As(err, &errResp) && errResp.Response.StatusCode == http.StatusConflict {
+		if errors.As(err, &errResp) && errResp != nil && errResp.Response != nil && errResp.Response.StatusCode == http.StatusConflict {
 			// Tag already exists — that's fine.
 		} else {
 			return fmt.Errorf("digitalocean: create tag: %w", err)
@@ -57,7 +107,11 @@ func (d *DigitalOcean) ensureFirewall(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("digitalocean: create firewall: %w", err)
 	}
+	if fw == nil || fw.ID == "" {
+		return errors.New("digitalocean: create firewall returned no id")
+	}
 	d.firewallID = fw.ID
+	d.firewallLastRefresh = time.Now()
 	return nil
 }
 
@@ -86,12 +140,12 @@ func (d *DigitalOcean) firewallRequest() *godo.FirewallRequest {
 			Sources:   &godo.Sources{Addresses: addrs},
 		}},
 		OutboundRules: []godo.OutboundRule{{
-			Protocol:  "tcp",
-			PortRange: "all",
+			Protocol:     "tcp",
+			PortRange:    "all",
 			Destinations: &godo.Destinations{Addresses: []string{"0.0.0.0/0", "::/0"}},
 		}, {
-			Protocol:  "udp",
-			PortRange: "all",
+			Protocol:     "udp",
+			PortRange:    "all",
 			Destinations: &godo.Destinations{Addresses: []string{"0.0.0.0/0", "::/0"}},
 		}, {
 			Protocol:     "icmp",

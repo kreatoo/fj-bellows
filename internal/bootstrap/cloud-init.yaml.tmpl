@@ -70,7 +70,7 @@ runcmd:
       *) echo "unsupported arch: $arch" >&2; exit 1 ;;
     esac
     url="https://code.forgejo.org/forgejo/runner/releases/download/v{{.RunnerVersion}}/forgejo-runner-{{.RunnerVersion}}-linux-${rarch}"
-    curl -fsSL -o /usr/local/bin/forgejo-runner "$url"
+    curl -fsSL -o /usr/local/bin/forgejo-runner --retry 5 --retry-all-errors --connect-timeout 10 --max-time 300 "$url"
     chmod +x /usr/local/bin/forgejo-runner
 {{- if .FJBAgentDownloadURL}}
   - |
@@ -82,9 +82,28 @@ runcmd:
       *) echo "unsupported arch: $arch" >&2; exit 1 ;;
     esac
     url="{{.FJBAgentDownloadURL}}"
-    curl -fsSL -o /usr/local/bin/fjbagent "$url"
+    curl -fsSL -o /usr/local/bin/fjbagent --retry 5 --retry-all-errors --connect-timeout 10 --max-time 300 "$url"
     chmod +x /usr/local/bin/fjbagent
   - systemctl daemon-reload
   - systemctl enable --now fjbagent
 {{- end}}
-  - touch {{.ReadyFile}}
+  # Never advertise readiness merely because cloud-init reached the end of
+  # runcmd. Verify the services and binaries first; otherwise a failed apt or
+  # download leaves a permanently wedged node that accepts jobs and freezes.
+  - |
+    set -eu
+    test -x /usr/local/bin/forgejo-runner
+    systemctl is-active --quiet docker
+    i=0
+    while ! docker info >/dev/null 2>&1; do
+      i=$((i + 1))
+      if [ "$i" -ge 30 ]; then
+        echo "docker did not become usable" >&2
+        exit 1
+      fi
+      sleep 2
+    done
+{{- if .FJBAgentDownloadURL}}
+    systemctl is-active --quiet fjbagent
+{{- end}}
+    install -D -m 0644 /dev/null {{.ReadyFile}}

@@ -10,12 +10,18 @@ import (
 
 func (d *DigitalOcean) ensureSSHKey(ctx context.Context, authorizedKey string) (int, error) {
 	want := strings.TrimSpace(authorizedKey)
+	d.sshKeyMu.Lock()
+	defer d.sshKeyMu.Unlock()
+	if d.sshKeyID != 0 && d.sshKeyValue == want {
+		return d.sshKeyID, nil
+	}
 	keys, err := d.client.ListKeys(ctx)
 	if err != nil {
 		return 0, fmt.Errorf("digitalocean: list ssh keys: %w", err)
 	}
 	for _, k := range keys {
 		if strings.TrimSpace(k.PublicKey) == want {
+			d.sshKeyID, d.sshKeyValue = k.ID, want
 			return k.ID, nil
 		}
 	}
@@ -26,6 +32,7 @@ func (d *DigitalOcean) ensureSSHKey(ctx context.Context, authorizedKey string) (
 	if err != nil {
 		return 0, fmt.Errorf("digitalocean: create ssh key: %w", err)
 	}
+	d.sshKeyID, d.sshKeyValue = k.ID, want
 	return k.ID, nil
 }
 

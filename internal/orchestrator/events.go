@@ -54,7 +54,7 @@ func (o *Orchestrator) Kick(ctx context.Context) (ReconcileResult, error) {
 	}
 	resultCh := make(chan ReconcileResult, 1)
 	select {
-	case o.kick <- kickReq{kind: kickReconcile, reconcile: resultCh}:
+	case o.kick <- kickReq{ctx: ctx, kind: kickReconcile, reconcile: resultCh}:
 	case <-ctx.Done():
 		return ReconcileResult{}, ctx.Err()
 	}
