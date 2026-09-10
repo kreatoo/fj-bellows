@@ -60,6 +60,18 @@ type CacheGatewayDispatcher struct {
 	// future diagnostics so callers can pre-wire a logger.
 	Log *slog.Logger
 
+	// KeepAliveInterval is how often the dispatch connection sends a
+	// want-reply SSH keepalive probe. Zero uses DefaultKeepAliveInterval
+	// (15s); a negative value disables keepalives entirely. The watchdog
+	// closes the connection when a probe goes unanswered for
+	// KeepAliveTimeout, which unblocks the dispatch goroutine instead of
+	// wedging it forever on a dead connection. Same semantics as
+	// SSHDispatcher.KeepAliveInterval.
+	KeepAliveInterval time.Duration
+	// KeepAliveTimeout bounds the wait for a keepalive reply before the
+	// connection is closed. Zero uses KeepAliveInterval.
+	KeepAliveTimeout time.Duration
+
 	pinsMu sync.Mutex
 	pins   map[string]ssh.PublicKey
 }
@@ -157,12 +169,17 @@ func (d *CacheGatewayDispatcher) dial(ctx context.Context, addr string) (*ssh.Cl
 	if err != nil {
 		return nil, fmt.Errorf("dial %s: %w", target, err)
 	}
-	c, chans, reqs, err := ssh.NewClientConn(conn, target, cfg)
+	// Wrap the connection so the keepalive watchdog sees closes initiated by
+	// client.Close() owners, and so closing from the watchdog is observable.
+	ka := newKeepaliveConn(conn)
+	c, chans, reqs, err := ssh.NewClientConn(ka, target, cfg)
 	if err != nil {
-		_ = conn.Close()
+		_ = ka.Close()
 		return nil, fmt.Errorf("ssh handshake %s: %w", target, err)
 	}
-	return ssh.NewClient(c, chans, reqs), nil
+	client := ssh.NewClient(c, chans, reqs)
+	startKeepalive(ka, client, keepaliveIntervalOrDefault(d.KeepAliveInterval), d.KeepAliveTimeout)
+	return client, nil
 }
 
 // dialNet is the net-layer dial used by dial(). It prefers an injected

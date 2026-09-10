@@ -56,6 +56,17 @@ type SSHDispatcher struct {
 	// etc.). Falls back to slog.Default when nil.
 	Log *slog.Logger
 
+	// KeepAliveInterval is how often the dispatch connection sends a
+	// want-reply SSH keepalive probe. Zero uses DefaultKeepAliveInterval
+	// (15s); a negative value disables keepalives entirely. The watchdog
+	// closes the connection when a probe goes unanswered for
+	// KeepAliveTimeout, which unblocks the dispatch goroutine instead of
+	// wedging it forever on a dead connection.
+	KeepAliveInterval time.Duration
+	// KeepAliveTimeout bounds the wait for a keepalive reply before the
+	// connection is closed. Zero uses KeepAliveInterval.
+	KeepAliveTimeout time.Duration
+
 	// pinsMu guards pins, the per-VM trust-on-first-use host-key store.
 	pinsMu sync.Mutex
 	pins   map[string]ssh.PublicKey
@@ -328,12 +339,17 @@ func (d *SSHDispatcher) dial(ctx context.Context, ip string) (*ssh.Client, error
 	if err != nil {
 		return nil, fmt.Errorf("dial %s: %w", addr, err)
 	}
-	c, chans, reqs, err := ssh.NewClientConn(conn, addr, cfg)
+	// Wrap the connection so the keepalive watchdog sees closes initiated by
+	// client.Close() owners, and so closing from the watchdog is observable.
+	ka := newKeepaliveConn(conn)
+	c, chans, reqs, err := ssh.NewClientConn(ka, addr, cfg)
 	if err != nil {
-		_ = conn.Close()
+		_ = ka.Close()
 		return nil, fmt.Errorf("ssh handshake %s: %w", addr, err)
 	}
-	return ssh.NewClient(c, chans, reqs), nil
+	client := ssh.NewClient(c, chans, reqs)
+	startKeepalive(ka, client, keepaliveIntervalOrDefault(d.KeepAliveInterval), d.KeepAliveTimeout)
+	return client, nil
 }
 
 func runRemote(ctx context.Context, client *ssh.Client, cmd string, stdin io.Reader) error {
