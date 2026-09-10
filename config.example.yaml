@@ -154,6 +154,13 @@ poll:
   # Cycle length for the kill mark; defaults to 1h matching every cloud's
   # hourly rounding. Shorten for faster idle reclamation (e2e uses seconds).
   # billing_hour: 1h
+  # Safety net: force-destroy a Busy worker after this long. A busy worker
+  # past the cap has a wedged dispatch goroutine (SSH connection died
+  # without an error) and would otherwise bill per-second forever while
+  # holding a scale.max slot. Defaults to 6h (Forgejo's default per-job
+  # timeout is 3h, so anything past 6h is wedged, not working). Raise it if
+  # legitimate jobs can run longer; set negative to disable.
+  # max_job_runtime: 6h
 
 ssh:
   # The orchestrator dispatches one-job to workers over SSH using this key.

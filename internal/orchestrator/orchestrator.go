@@ -755,15 +755,17 @@ func (o *Orchestrator) dispatch(ctx context.Context, node Node, job forgejo.Wait
 	if !o.markDispatching(job.Handle) {
 		return false
 	}
-	o.pool.SetState(node.InstanceID, StateBusy)
-	o.pool.SetJob(node.InstanceID, job.Handle)
+	if !o.pool.MarkBusy(node.InstanceID, job.Handle, o.now()) {
+		// syncPool dropped the node between our snapshot and now (the
+		// provider no longer reports it) — don't dispatch to a ghost.
+		o.unmarkDispatching(job.Handle)
+		return false
+	}
 	o.emit("worker_busy", map[string]string{attrID: node.InstanceID, attrIP: node.IP, attrHandle: job.Handle})
 	o.wg.Go(func() {
 		started := time.Now()
 		defer func() {
-			o.pool.SetState(node.InstanceID, StateIdle)
-			o.pool.SetJob(node.InstanceID, "")
-			o.pool.Touch(node.InstanceID, o.now())
+			o.pool.MarkIdle(node.InstanceID, o.now())
 			o.unmarkDispatching(job.Handle)
 			o.emit("worker_idle", map[string]string{attrID: node.InstanceID, attrIP: node.IP, attrDurationMS: strconv.FormatInt(time.Since(started).Milliseconds(), 10)})
 		}()
@@ -917,6 +919,31 @@ func (o *Orchestrator) applyTeardown(ctx context.Context) int {
 	for _, n := range o.pool.ByState(StateRemoving) {
 		// A concurrent caller may have already claimed this node; SetState is
 		// deliberately not used here because the state is already removing.
+		if o.startDestroy(ctx, n) {
+			reaped++
+		}
+	}
+	// Busy nodes are protected from billing-policy teardown while their job
+	// runs — but a job that overruns MaxJobRuntime can never finish: its
+	// dispatch goroutine is wedged on a dead connection and nothing will
+	// ever return the node to Idle. Force-reap it so a hung session can't
+	// bill forever and hold a scale.max slot (the 2026-09-10 wedge).
+	for _, n := range o.pool.ByState(StateBusy) {
+		if !o.cfg.Teardown.StaleBusy(n, now) {
+			continue
+		}
+		o.log.Warn("reaping stale busy worker",
+			"id", n.InstanceID, "ip", n.IP, "handle", n.CurrentJob,
+			"busy_since", n.BusySince.Format(time.RFC3339),
+			"max_runtime", o.cfg.Teardown.MaxJobRuntime.String())
+		o.emit("worker_stale_reap", map[string]string{
+			attrID:     n.InstanceID,
+			attrIP:     n.IP,
+			attrHandle: n.CurrentJob,
+		})
+		if !o.pool.SetState(n.InstanceID, StateRemoving) {
+			continue
+		}
 		if o.startDestroy(ctx, n) {
 			reaped++
 		}

@@ -616,6 +616,7 @@ var knownEventTypes = []string{
 	"worker_reaped",
 	"worker_adopted",
 	"worker_dropped",
+	"worker_stale_reap",
 	"job_dispatched",
 	"job_complete",
 	"zombie_reaped",

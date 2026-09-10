@@ -421,6 +421,7 @@ func (b *controlBackend) ReloadConfig(_ context.Context) ([]string, error) {
 	next.Teardown.IdleTimeout = newCfg.Poll.IdleTimeout.D()
 	next.Teardown.HourMargin = newCfg.Poll.HourMargin.D()
 	next.Teardown.BillingHour = newCfg.Poll.BillingHour.D()
+	next.Teardown.MaxJobRuntime = newCfg.Poll.MaxJobRuntime.D()
 	// Non-hot fields the on-disk file carries: surfacing a change here
 	// before ApplyHotConfig keeps the error message close to the file
 	// the operator just edited.
@@ -872,10 +873,11 @@ func buildOrchestratorConfig(cfg *config.Config, opts runOpts, buildVersion, aut
 		FJBAgentDownloadURL: fjbAgentURL,
 		FJBAgentToken:       fjbAgentToken,
 		Teardown: orchestrator.TeardownPolicy{
-			Model:       prov.BillingModel(),
-			IdleTimeout: cfg.Poll.IdleTimeout.D(),
-			HourMargin:  cfg.Poll.HourMargin.D(),
-			BillingHour: cfg.Poll.BillingHour.D(),
+			Model:         prov.BillingModel(),
+			IdleTimeout:   cfg.Poll.IdleTimeout.D(),
+			HourMargin:    cfg.Poll.HourMargin.D(),
+			BillingHour:   cfg.Poll.BillingHour.D(),
+			MaxJobRuntime: cfg.Poll.MaxJobRuntime.D(),
 		},
 		DrainOnShutdown: opts.drain,
 		DrainTimeout:    opts.drainTimeout,

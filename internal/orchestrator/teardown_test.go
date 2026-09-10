@@ -199,3 +199,56 @@ func TestTimingUnknownModel(t *testing.T) {
 		t.Errorf("unknown model Timing = %+v, want zero value", got)
 	}
 }
+
+func TestStaleBusy(t *testing.T) {
+	base := time.Date(2026, 1, 1, 10, 0, 0, 0, time.UTC)
+	busy := Node{
+		State:      StateBusy,
+		CurrentJob: "h1",
+		BusySince:  base,
+	}
+
+	tp := TeardownPolicy{MaxJobRuntime: time.Hour}
+	cases := []struct {
+		name    string
+		policy  TeardownPolicy
+		node    Node
+		elapsed time.Duration
+		want    bool
+	}{
+		{"under cap", tp, busy, 30 * time.Minute, false},
+		{"at cap", tp, busy, time.Hour, true},
+		{"past cap", tp, busy, 7 * time.Hour, true},
+		// Zero cap disables the safety net entirely (config.Load supplies a
+		// default; zero is the "operator opted out" signal at this layer).
+		{"zero cap disabled", TeardownPolicy{}, busy, 1000 * time.Hour, false},
+		{"negative cap disabled", TeardownPolicy{MaxJobRuntime: -time.Hour}, busy, 1000 * time.Hour, false},
+		// Unknown dispatch start (pool state from an older version, or
+		// mid-adoption): never stale.
+		{"zero busy-since", TeardownPolicy{MaxJobRuntime: time.Hour}, Node{State: StateBusy}, 1000 * time.Hour, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			now := tc.node.BusySince.Add(tc.elapsed)
+			if tc.node.BusySince.IsZero() {
+				now = base.Add(tc.elapsed)
+			}
+			if got := tc.policy.StaleBusy(tc.node, now); got != tc.want {
+				t.Errorf("StaleBusy() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// StaleBusy must be independent of the billing model: a wedged busy node
+// bills (or holds a paid hour) under every model.
+func TestStaleBusyIndependentOfBillingModel(t *testing.T) {
+	base := time.Date(2026, 1, 1, 10, 0, 0, 0, time.UTC)
+	n := Node{State: StateBusy, BusySince: base}
+	for _, model := range []provider.BillingModel{provider.BillingPerSecond, provider.BillingHourlyRoundUp} {
+		tp := TeardownPolicy{Model: model, IdleTimeout: 5 * time.Minute, MaxJobRuntime: time.Hour}
+		if !tp.StaleBusy(n, base.Add(2*time.Hour)) {
+			t.Errorf("model %v: busy node past MaxJobRuntime must be stale", model)
+		}
+	}
+}

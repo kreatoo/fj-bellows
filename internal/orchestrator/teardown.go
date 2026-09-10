@@ -18,6 +18,17 @@ type TeardownPolicy struct {
 	// and operators who want faster reclamation can override it; the provider
 	// still bills its real hourly rate regardless of what we pick here.
 	BillingHour time.Duration
+
+	// MaxJobRuntime is the safety-net hard cap on how long a node may stay
+	// Busy. A busy node past this cap has a wedged dispatch goroutine — the
+	// SSH session carrying one-job can never return (e.g. a connection that
+	// died without a TCP reset and no keepalive fired) — so nothing will
+	// ever move it back to Idle. Left alone it bills per-second forever and
+	// consumes a scale.max slot. Such nodes are force-destroyed like any
+	// other reap. Zero disables the cap (config.Load supplies a default of
+	// 6h — Forgejo's default per-job timeout is 3h, so anything past 6h is
+	// wedged, not working); a negative value also disables it.
+	MaxJobRuntime time.Duration
 }
 
 // Billing-model strings exposed by Timing.BillingModel. Stable wire constants
@@ -62,6 +73,19 @@ func (tp TeardownPolicy) ShouldTeardown(n Node, now time.Time) bool {
 	default:
 		return false
 	}
+}
+
+// StaleBusy reports whether a busy node has overrun MaxJobRuntime and must
+// be force-reaped regardless of billing model. It is orthogonal to
+// ShouldTeardown, which only ever applies to idle nodes. Nodes whose
+// dispatch start time is unknown (BusySince zero — e.g. pool state built by
+// an older version or mid-adoption) are never considered stale; a restarted
+// daemon re-adopts them as Idle and the billing policy takes over.
+func (tp TeardownPolicy) StaleBusy(n Node, now time.Time) bool {
+	if tp.MaxJobRuntime <= 0 || n.BusySince.IsZero() {
+		return false
+	}
+	return now.Sub(n.BusySince) >= tp.MaxJobRuntime
 }
 
 // Timing returns the teardown-timing snapshot for a node under the current

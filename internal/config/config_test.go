@@ -55,6 +55,9 @@ ssh:
 	if cfg.Poll.BillingHour.D() != time.Hour {
 		t.Errorf("default billing_hour = %s, want 1h", cfg.Poll.BillingHour.D())
 	}
+	if cfg.Poll.MaxJobRuntime.D() != 6*time.Hour {
+		t.Errorf("default max_job_runtime = %s, want 6h", cfg.Poll.MaxJobRuntime.D())
+	}
 	if cfg.SSH.User != "root" || cfg.SSH.Port != 22 {
 		t.Errorf("ssh defaults = %q:%d", cfg.SSH.User, cfg.SSH.Port)
 	}
@@ -176,5 +179,36 @@ poll: {interval: not-a-duration}
 `)
 	if _, err := Load(path); err == nil {
 		t.Fatal("expected duration parse error")
+	}
+}
+
+func TestLoadMaxJobRuntimeOverrideAndDisable(t *testing.T) {
+	base := `
+forgejo:
+  url: https://forgejo.example.com
+  token: secret-token
+  scope: orgs/example
+provider: linode
+provider_config: {}
+ssh:
+  private_key_file: /tmp/id
+`
+	path := writeTemp(t, "config.yaml", base+"poll:\n  max_job_runtime: 90m\n")
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Poll.MaxJobRuntime.D() != 90*time.Minute {
+		t.Errorf("max_job_runtime = %s, want 90m", cfg.Poll.MaxJobRuntime.D())
+	}
+
+	// Negative disables the stale-busy safety net.
+	path = writeTemp(t, "config.yaml", base+"poll:\n  max_job_runtime: -1s\n")
+	cfg, err = Load(path)
+	if err != nil {
+		t.Fatalf("Load (negative): %v", err)
+	}
+	if cfg.Poll.MaxJobRuntime.D() >= 0 {
+		t.Errorf("negative max_job_runtime must be preserved, got %s", cfg.Poll.MaxJobRuntime.D())
 	}
 }

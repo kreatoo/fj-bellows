@@ -86,6 +86,17 @@ type Poll struct {
 	// boundary, trading the fill-the-paid-hour benefit for faster reclamation;
 	// E2E tests use a short value (e.g. 60s) to exercise idle teardown live.
 	BillingHour Duration `yaml:"billing_hour"`
+
+	// MaxJobRuntime is the safety-net hard cap on how long a worker may stay
+	// Busy with one job. A busy node past this cap has a wedged dispatch
+	// goroutine — the SSH session carrying one-job died without an error, so
+	// nothing will ever return the node to Idle — and would otherwise bill
+	// per-second forever while holding a scale.max slot. Such nodes are
+	// force-destroyed on the next reconcile tick. Defaults to 6h: Forgejo's
+	// default per-job timeout is 3h, so anything past 6h is wedged, not
+	// working. Raise it if legitimate jobs can run longer; set negative to
+	// disable the safety net entirely.
+	MaxJobRuntime Duration `yaml:"max_job_runtime"`
 }
 
 // SSH configures how the orchestrator reaches worker VMs to dispatch one-job.
@@ -143,6 +154,11 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Poll.BillingHour == 0 {
 		c.Poll.BillingHour = Duration(time.Hour)
+	}
+	if c.Poll.MaxJobRuntime == 0 {
+		// 2x Forgejo's default 3h per-job timeout: a busy worker past this
+		// is wedged, never working. Negative disables the cap.
+		c.Poll.MaxJobRuntime = Duration(6 * time.Hour)
 	}
 	if c.SSH.User == "" {
 		c.SSH.User = "root"

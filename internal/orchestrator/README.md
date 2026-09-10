@@ -52,6 +52,14 @@ dispatch/teardown goroutines mutate only their own node's state.
   `BillingHour=60s, HourMargin=10s` → kill at `created+50s`) to exercise idle
   teardown live without waiting an hour. Timers are **derived from `CreatedAt`
   each tick**, not stored, so they survive restarts.
+- **Stale-busy safety net** -- `MaxJobRuntime` (config `poll.max_job_runtime`,
+  default 6h) caps how long a node may stay Busy. A busy node past the cap has
+  a wedged dispatch goroutine and can never return to Idle on its own; it
+  would bill per-second forever while holding a scale.max slot. Such nodes are
+  force-destroyed on the next tick. The dispatch start is stamped per job
+  (`Node.BusySince`, not persisted -- adoption re-adds nodes as Idle), so the
+  cap measures the job, not the idle gap before it. Zero or negative disables
+  the net.
 
 ## Shutdown
 
@@ -73,6 +81,14 @@ in-process with `golang.org/x/crypto/ssh`, writes the one-shot token via stdin
 (never the command line), and runs `forgejo-runner one-job ... --wait` to
 completion. The composition root (`cmd/fj-bellows`) injects the dispatcher, so a
 provider whose workers aren't reached over SSH supplies a different one.
+
+Every dispatch connection runs an **SSH keepalive watchdog** (`keepalive.go`):
+a want-reply `keepalive@openssh.com` request every `KeepAliveInterval` (default
+15s), and the connection is closed when a probe goes unanswered for
+`KeepAliveTimeout` (default 15s). Without it, a connection that dies without a
+TCP reset (kernel hang, silent network drop) blocks the dispatch goroutine's
+session read forever -- the wedged-Busy scenario the stale-busy net above
+backstops. A negative `KeepAliveInterval` disables the watchdog.
 
 Host keys are verified with **trust-on-first-use (TOFU) per-VM pinning**: fresh
 per-hour VMs have no pre-known host key, so the first successful handshake to an

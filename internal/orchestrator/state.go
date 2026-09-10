@@ -44,6 +44,14 @@ type Node struct {
 	// dispatch goroutine sets it on Busy and clears it on the Idle return.
 	// Empty unless State == StateBusy.
 	CurrentJob string
+	// BusySince is when the current dispatch started; it anchors the
+	// stale-busy reap (TeardownPolicy.MaxJobRuntime). LastBusy keeps its
+	// "last completion" meaning and does NOT move when a node goes busy —
+	// a node can sit idle for hours before its next job — so job runtime
+	// must not be measured from it. BusySince is deliberately not
+	// persisted across restarts: adoption re-adds nodes as Idle, and every
+	// post-restart dispatch re-stamps it.
+	BusySince time.Time
 }
 
 // Pool is the concurrency-safe set of nodes. The reconcile loop is the only
@@ -104,6 +112,43 @@ func (p *Pool) Touch(id string, t time.Time) {
 	if n, ok := p.nodes[id]; ok {
 		n.LastBusy = t
 	}
+}
+
+// MarkBusy atomically transitions a node to Busy: state, the job handle in
+// flight, and the dispatch timestamp that anchors the stale-busy reap.
+// Returns false when the node vanished (syncPool dropped it between the
+// caller's snapshot and this call) — callers must not dispatch to a node
+// the provider no longer reports.
+func (p *Pool) MarkBusy(id, handle string, at time.Time) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	n, ok := p.nodes[id]
+	if !ok {
+		return false
+	}
+	n.State = StateBusy
+	n.CurrentJob = handle
+	n.BusySince = at
+	return true
+}
+
+// MarkIdle atomically returns a node to Idle after its dispatch goroutine
+// finishes: clears the job handle and BusySince, and stamps LastBusy so the
+// per-second idle timer measures from the completion instant. No-op when
+// the node is already gone (e.g. force-reaped while the goroutine was
+// wedged).
+func (p *Pool) MarkIdle(id string, at time.Time) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	n, ok := p.nodes[id]
+	if !ok {
+		return false
+	}
+	n.State = StateIdle
+	n.CurrentJob = ""
+	n.BusySince = time.Time{}
+	n.LastBusy = at
+	return true
 }
 
 // SetJob records the Forgejo job handle in flight on a node. Pass "" to
