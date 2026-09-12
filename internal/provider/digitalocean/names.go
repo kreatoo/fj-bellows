@@ -6,7 +6,7 @@ import (
 	"strings"
 )
 
-func sanitizeName(s string, max int) string {
+func sanitizeName(s string, maxLen int) string {
 	var b strings.Builder
 	for _, r := range strings.ToLower(s) {
 		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' {
@@ -19,14 +19,14 @@ func sanitizeName(s string, max int) string {
 	if out == "" {
 		out = "default"
 	}
-	if len(out) <= max {
+	if len(out) <= maxLen {
 		return out
 	}
 	sum := sha256.Sum256([]byte(out))
 	suffix := hex.EncodeToString(sum[:])[:8]
-	keep := max - len(suffix) - 1
+	keep := maxLen - len(suffix) - 1
 	if keep <= 0 {
-		return out[:max]
+		return out[:maxLen]
 	}
 	return strings.TrimRight(out[:keep], "-") + "-" + suffix
 }

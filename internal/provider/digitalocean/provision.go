@@ -2,6 +2,7 @@ package digitalocean
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strconv"
@@ -57,7 +58,7 @@ func (d *DigitalOcean) Provision(ctx context.Context, spec provider.Spec) (provi
 		return provider.Instance{}, fmt.Errorf("digitalocean: create droplet: %w", err)
 	}
 	if droplet == nil || droplet.ID == 0 {
-		return provider.Instance{}, fmt.Errorf("digitalocean: create droplet returned no id")
+		return provider.Instance{}, errors.New("digitalocean: create droplet returned no id")
 	}
 	dropletIDValue := droplet.ID
 	droplet, err = d.pollDropletPublicIP(provisionCtx, dropletIDValue)
@@ -69,7 +70,7 @@ func (d *DigitalOcean) Provision(ctx context.Context, spec provider.Spec) (provi
 		cleanupErr := d.client.DeleteDroplet(cleanupCtx, dropletIDValue)
 		cleanupCancel()
 		if cleanupErr != nil && !isNotFound(cleanupErr) {
-			return provider.Instance{}, fmt.Errorf("%w (cleanup droplet: %v)", err, cleanupErr)
+			return provider.Instance{}, fmt.Errorf("%w (cleanup droplet: %w)", err, cleanupErr)
 		}
 		return provider.Instance{}, err
 	}
@@ -106,7 +107,7 @@ func (d *DigitalOcean) pollDropletPublicIP(ctx context.Context, id int) (*godo.D
 			lastErr = err
 			slog.Warn("digitalocean: poll droplet", "id", id, "err", err)
 		} else if droplet == nil {
-			lastErr = fmt.Errorf("empty droplet response")
+			lastErr = errors.New("empty droplet response")
 		} else if publicIPv4(*droplet) != "" {
 			return droplet, nil
 		}
@@ -162,8 +163,8 @@ func (d *DigitalOcean) resolveImageSizeForLabels(labels []string) (size, image s
 	// map by the bare label while the spec may carry :docker://image.
 	for _, label := range labels {
 		keys := []string{label}
-		if i := strings.IndexByte(label, ':'); i >= 0 {
-			keys = append(keys, label[:i])
+		if before, _, ok := strings.Cut(label, ":"); ok {
+			keys = append(keys, before)
 		}
 		for _, key := range keys {
 			if lc, ok := d.cfg.Labels[key]; ok {

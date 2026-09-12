@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -168,7 +169,7 @@ func resolveAllowInbound(ctx context.Context, addrs []string, autoFn func(contex
 				return nil, fmt.Errorf("auto sentinel: %w", err)
 			}
 			if len(cidrs) == 0 {
-				return nil, fmt.Errorf("auto sentinel resolved to zero CIDRs")
+				return nil, errors.New("auto sentinel resolved to zero CIDRs")
 			}
 			out = append(out, cidrs...)
 		case sentinelAny:
@@ -223,10 +224,5 @@ func probeIP(ctx context.Context, url string) (string, error) {
 }
 
 func hasString(xs []string, want string) bool {
-	for _, x := range xs {
-		if x == want {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(xs, want)
 }

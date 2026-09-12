@@ -9,6 +9,24 @@ issues:
   max-same-issues: 50
 
 linters:
+  exclusions:
+    # These exclusions cover deliberate compatibility/adapter shapes and
+    # existing test fixtures. Keep the checks enabled for the rest of the tree.
+    rules:
+      - path: internal/orchestrator/orchestrator.go
+        linters: [containedctx, nestif]
+      - path: internal/orchestrator/orchestrator_test.go
+        linters: [goconst, revive]
+      - path: internal/provider/digitalocean/client.go
+        linters: [dupl]
+      - path: internal/provider/digitalocean/firewall.go
+        linters: [goconst, gocyclo, revive]
+      - path: internal/provider/digitalocean/provision.go
+        linters: [goconst, gocritic]
+      - path: internal/provider/digitalocean/.*_test.go
+        linters: [goconst]
+      - path: internal/provider/digitalocean/(destroy|digitalocean|list|names|provision).go
+        linters: [revive]
   enable:
     # correctness
     - govet

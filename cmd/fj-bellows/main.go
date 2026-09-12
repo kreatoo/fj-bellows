@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -133,7 +134,7 @@ func run(opts runOpts, log *slog.Logger, logBus *logbus.Bus) error {
 		return fmt.Errorf("digitalocean does not support transport.mode=%q: droplets have no VPC address", config.TransportCacheGateway)
 	}
 	if cfg.Provider == "digitalocean" && cfg.SSH.Port != 22 {
-		return fmt.Errorf("digitalocean workers require ssh.port=22 because the managed firewall exposes tcp/22")
+		return errors.New("digitalocean workers require ssh.port=22 because the managed firewall exposes tcp/22")
 	}
 	applyAuthorizedKeyToLinodeProvider(prov, authKey)
 	// Propagate transport mode into the Linode provider so its managed
