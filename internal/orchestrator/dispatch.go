@@ -332,7 +332,11 @@ func (d *SSHDispatcher) dial(ctx context.Context, ip string) (*ssh.Client, error
 		User:            d.User,
 		Auth:            []ssh.AuthMethod{ssh.PublicKeys(d.Signer)},
 		HostKeyCallback: d.tofuHostKeyCallback(addr),
-		Timeout:         d.DialTimeout,
+		// Workers receive a freshly generated ed25519 host key through
+		// cloud-init. Prefer that algorithm so sshd does not select its
+		// default ECDSA key before the pinned key can be checked.
+		HostKeyAlgorithms: []string{ssh.KeyAlgoED25519},
+		Timeout:           d.DialTimeout,
 	}
 	dialer := net.Dialer{Timeout: d.DialTimeout}
 	conn, err := dialer.DialContext(ctx, "tcp", addr)
