@@ -69,8 +69,9 @@ func TestProvisionVisibleBeforeReturn(t *testing.T) {
 	})
 	for range 3 {
 		result := o.Reconcile(ctx)
-		if result.Adopted != 0 || result.Dispatched != 0 || result.Provisioned != 0 || o.pool.Len() != 0 || o.PendingProvisions() != 1 {
-			t.Fatalf("in-flight instance adopted or capacity miscounted: %+v", result)
+		assertNoCapacityActions(t, result)
+		if o.pool.Len() != 0 || o.PendingProvisions() != 1 {
+			t.Fatal("in-flight capacity miscounted")
 		}
 	}
 	close(returnProvision)
@@ -83,9 +84,7 @@ func TestProvisionVisibleBeforeReturn(t *testing.T) {
 		}
 	})
 	result := o.Reconcile(ctx)
-	if result.Adopted != 0 || result.Dispatched != 0 || result.Provisioned != 0 {
-		t.Fatalf("booting VM dispatched: %+v", result)
-	}
+	assertNoCapacityActions(t, result)
 	close(ready)
 	waitFor(t, "ready", func() bool { return len(o.pool.ByState(StateIdle)) == 1 })
 	if result := o.Reconcile(ctx); result.Dispatched != 1 {
@@ -96,6 +95,13 @@ func TestProvisionVisibleBeforeReturn(t *testing.T) {
 	}
 	if prov.ProvisionCount() != 1 {
 		t.Fatal("extra VM provisioned")
+	}
+}
+
+func assertNoCapacityActions(t *testing.T, result ReconcileResult) {
+	t.Helper()
+	if result.Adopted != 0 || result.Dispatched != 0 || result.Provisioned != 0 {
+		t.Fatalf("unexpected adoption, dispatch, or provision: %+v", result)
 	}
 }
 
