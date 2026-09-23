@@ -105,6 +105,19 @@ func (p *Pool) SetState(id string, s NodeState) bool {
 	return true
 }
 
+// CompareAndSwapState transitions only a node still in the expected state.
+// Async readiness results must not overwrite a newer dispatch or removal.
+func (p *Pool) CompareAndSwapState(id string, from, to NodeState) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	n, ok := p.nodes[id]
+	if !ok || n.State != from {
+		return false
+	}
+	n.State = to
+	return true
+}
+
 // Touch records that a node just finished a job (now Idle).
 func (p *Pool) Touch(id string, t time.Time) {
 	p.mu.Lock()
@@ -116,14 +129,13 @@ func (p *Pool) Touch(id string, t time.Time) {
 
 // MarkBusy atomically transitions a node to Busy: state, the job handle in
 // flight, and the dispatch timestamp that anchors the stale-busy reap.
-// Returns false when the node vanished (syncPool dropped it between the
-// caller's snapshot and this call) — callers must not dispatch to a node
-// the provider no longer reports.
+// Returns false when the node vanished or is no longer Idle. A stale
+// snapshot must not dispatch to a provisioning, busy, or removing worker.
 func (p *Pool) MarkBusy(id, handle string, at time.Time) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	n, ok := p.nodes[id]
-	if !ok {
+	if !ok || n.State != StateIdle {
 		return false
 	}
 	n.State = StateBusy

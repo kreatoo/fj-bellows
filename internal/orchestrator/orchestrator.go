@@ -620,7 +620,9 @@ func (o *Orchestrator) doForceProvision(ctx context.Context) forceResult {
 			o.markProvisionFailed(id, ip)
 			return
 		}
-		o.pool.SetState(id, StateIdle)
+		if !o.pool.CompareAndSwapState(id, StateProvisioning, StateIdle) {
+			return
+		}
 		o.log.Info("force-provisioned worker ready", "id", id)
 		o.emit("worker_ready", map[string]string{attrID: id, attrIP: ip, attrDurationMS: strconv.FormatInt(time.Since(started).Milliseconds(), 10)})
 	})
@@ -665,7 +667,8 @@ func (o *Orchestrator) reapZombieRunners(ctx context.Context) {
 }
 
 // syncPool adopts provider instances unknown to the pool (crash recovery) and
-// drops pool nodes the provider no longer reports. Provisioning nodes are never
+// drops pool nodes the provider no longer reports. Adoption waits until all
+// pending creates have published their IDs. Provisioning nodes are never
 // dropped: a freshly created VM may not appear in List yet. Returns the count
 // of nodes adopted and dropped this tick.
 func (o *Orchestrator) syncPool(insts []provider.Instance) (adopted, dropped int) {
@@ -673,7 +676,14 @@ func (o *Orchestrator) syncPool(insts []provider.Instance) (adopted, dropped int
 	seen := map[string]struct{}{}
 	for _, in := range insts {
 		seen[in.ID] = struct{}{}
-		if _, ok := o.pool.Get(in.ID); !ok {
+		// List may expose our VM before Provision returns its ID. Defer
+		// unknown-instance adoption while any create is pending. Holding mu
+		// through insertion serializes this check with pending retirement;
+		// genuine crash-recovery orphans will be adopted on a later tick.
+		o.mu.Lock()
+		_, known := o.pool.Get(in.ID)
+		adopt := !known && o.pending == 0
+		if adopt {
 			o.pool.Put(&Node{
 				InstanceID: in.ID,
 				State:      StateIdle, // adopt as warm; readiness re-confirmed on dispatch
@@ -682,6 +692,9 @@ func (o *Orchestrator) syncPool(insts []provider.Instance) (adopted, dropped int
 				CreatedAt:  in.CreatedAt,
 				LastBusy:   now,
 			})
+		}
+		o.mu.Unlock()
+		if adopt {
 			o.log.Info("adopted orphan instance", "id", in.ID, "ip", in.IPv4)
 			o.emit("worker_adopted", map[string]string{attrID: in.ID, attrIP: in.IPv4})
 			adopted++
@@ -868,7 +881,9 @@ func (o *Orchestrator) provisionOne(ctx context.Context) {
 			o.markProvisionFailed(inst.ID, inst.IPv4)
 			return
 		}
-		o.pool.SetState(inst.ID, StateIdle)
+		if !o.pool.CompareAndSwapState(inst.ID, StateProvisioning, StateIdle) {
+			return
+		}
 		o.log.Info("worker ready", "id", inst.ID)
 		o.emit("worker_ready", map[string]string{attrID: inst.ID, attrIP: inst.IPv4, attrDurationMS: strconv.FormatInt(time.Since(started).Milliseconds(), 10)})
 	})
@@ -878,7 +893,7 @@ func (o *Orchestrator) provisionOne(ctx context.Context) {
 // failed into the normal removal path. Destruction uses a fresh bounded context
 // because the reconcile/job context may be cancelled during shutdown.
 func (o *Orchestrator) markProvisionFailed(id, ip string) {
-	if !o.pool.SetState(id, StateRemoving) || !o.claimDestroy(id) {
+	if !o.pool.CompareAndSwapState(id, StateProvisioning, StateRemoving) || !o.claimDestroy(id) {
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)

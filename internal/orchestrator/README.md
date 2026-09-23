@@ -24,6 +24,9 @@ Each tick, under the single reconcile goroutine:
 1. `provider.List(tag)` — ground truth. Adopt unknown instances (crash
    recovery, rebuilding billing timers from `CreatedAt`); drop vanished ones
    (Provisioning nodes are never dropped — a fresh VM may not be listed yet).
+   Unknown-instance adoption waits while a create is pending: providers can
+   list a VM before `Provision` returns its ID. Readiness completion only
+   transitions a still-Provisioning node, never a Busy or Removing worker.
 2. `WaitingJobs` — filter to jobs whose required labels this pool offers.
 3. Dispatch each serviceable job to an Idle node; provision for the rest, capped
    by `MaxScale` (in-flight provisions count as `pending` so concurrent ticks
