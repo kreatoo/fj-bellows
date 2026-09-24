@@ -14,3 +14,6 @@ The client authenticates with the admin token (`Authorization: token <token>`).
 
 > The exact job JSON field names should be confirmed against the live Forgejo
 > (≥ v15.0) API; unknown fields are ignored.
+
+`OneJobArgs` and `AcquisitionConfig` define the shared one-shot task-fetch policy
+for all dispatch transports. See the orchestrator README for timeout semantics.

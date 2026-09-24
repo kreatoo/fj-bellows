@@ -3,6 +3,7 @@ package docker
 import (
 	"context"
 	"errors"
+	"io"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -79,7 +80,8 @@ func TestRunJobDeliversTokenViaStdin(t *testing.T) {
 	fc := &fakeCLI{
 		responses: []fakeResponse{
 			{stdout: nil}, // first call: write token via stdin
-			{stdout: nil}, // second call: forgejo-runner one-job
+			{stdout: nil}, // second call: runner config
+			{stdout: nil}, // third call: forgejo-runner one-job
 		},
 	}
 	d := NewExecDispatcher(fc, "docker", "https://forgejo.example/", []string{"label-a", "label-b"}, time.Second)
@@ -91,8 +93,8 @@ func TestRunJobDeliversTokenViaStdin(t *testing.T) {
 	}
 
 	calls := fc.snapshot()
-	if len(calls) != 2 {
-		t.Fatalf("calls = %d, want 2", len(calls))
+	if len(calls) != 3 {
+		t.Fatalf("calls = %d, want 3", len(calls))
 	}
 
 	// Call 1: docker exec -i <id> sh -c 'cat > /tmp/tok && chmod 600 /tmp/tok'
@@ -117,8 +119,11 @@ func TestRunJobDeliversTokenViaStdin(t *testing.T) {
 		}
 	}
 
-	// Call 2: docker exec <id> forgejo-runner one-job --url ... --label label-a,label-b --handle handle-1 --wait
-	c2 := calls[1]
+	// Call 3: docker exec <id> forgejo-runner one-job --url ... --label label-a,label-b --handle handle-1 --config /tmp/runner-cfg.yml
+	if calls[1].stdin != forgejo.AcquisitionConfig {
+		t.Fatalf("acquisition config = %q", calls[1].stdin)
+	}
+	c2 := calls[2]
 	want2 := []string{
 		"exec", containerID,
 		"forgejo-runner", "one-job",
@@ -127,7 +132,7 @@ func TestRunJobDeliversTokenViaStdin(t *testing.T) {
 		"--token-url", "file:/tmp/tok",
 		"--label", "label-a,label-b",
 		"--handle", "handle-1",
-		"--wait",
+		"--config", "/tmp/runner-cfg.yml",
 	}
 	if strings.Join(c2.args, " ") != strings.Join(want2, " ") {
 		t.Errorf("call2 args = %v\nwant %v", c2.args, want2)
@@ -147,6 +152,7 @@ func TestRunJobOneJobError(t *testing.T) {
 	fc := &fakeCLI{
 		responses: []fakeResponse{
 			{stdout: nil},               // token write succeeds
+			{stdout: nil},               // runner config write succeeds
 			{err: errors.New("exit 1")}, // one-job fails
 		},
 	}
@@ -160,6 +166,7 @@ func TestRunJobOneJobError(t *testing.T) {
 func TestRunJobCtxCancel(t *testing.T) {
 	fc := &fakeCLI{
 		responses: []fakeResponse{
+			{stdout: nil},
 			{stdout: nil},
 			{err: context.Canceled},
 		},
@@ -177,5 +184,42 @@ func TestNewDefaultRunner(t *testing.T) {
 	}
 	if got := NewDefaultRunner("docker"); got == nil {
 		t.Fatal("NewDefaultRunner returned nil")
+	}
+}
+
+func TestRunJobConfigWriteError(t *testing.T) {
+	fc := &fakeCLI{responses: []fakeResponse{{}, {err: errors.New("write failed")}}}
+	d := NewExecDispatcher(fc, "docker", "u", nil, time.Second)
+	err := d.RunJob(t.Context(), containerID, "", forgejo.Registration{}, forgejo.WaitingJob{})
+	if err == nil || !strings.Contains(err.Error(), "write runner config") {
+		t.Fatalf("err = %v, want runner config error", err)
+	}
+	if len(fc.snapshot()) != 2 {
+		t.Fatal("must not launch runner after config write failure")
+	}
+}
+
+// contextCheckingCLI verifies acquisition never adds a process-wide deadline.
+type contextCheckingCLI struct {
+	t      *testing.T
+	parent context.Context
+}
+
+func (c contextCheckingCLI) Run(ctx context.Context, _ io.Reader, _ ...string) ([]byte, error) {
+	c.t.Helper()
+	if ctx != c.parent {
+		c.t.Fatal("dispatch must preserve the caller context, not add an acquisition deadline")
+	}
+	if _, ok := ctx.Deadline(); ok {
+		c.t.Fatal("short deadline could kill an acquired job")
+	}
+	return nil, nil
+}
+
+func TestRunJobDoesNotLimitExecutionToAcquisitionTimeout(t *testing.T) {
+	ctx := t.Context()
+	d := NewExecDispatcher(contextCheckingCLI{t: t, parent: ctx}, "docker", "u", nil, time.Second)
+	if err := d.RunJob(ctx, containerID, "", forgejo.Registration{}, forgejo.WaitingJob{}); err != nil {
+		t.Fatal(err)
 	}
 }

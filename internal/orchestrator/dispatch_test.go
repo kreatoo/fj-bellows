@@ -8,6 +8,8 @@ import (
 	"testing"
 
 	"golang.org/x/crypto/ssh"
+
+	"github.com/hstern/fj-bellows/internal/forgejo"
 )
 
 func TestShellQuote(t *testing.T) {
@@ -181,22 +183,22 @@ func TestRunnerConfigYAML(t *testing.T) {
 		{
 			name: "hostname: docker_host=automount + tunnel propagation",
 			in:   forgejoTarget{host: hostInternal, port: 443},
-			want: "container:\n  docker_host: automount\n  network: host\n  options: \"--add-host=" + hostInternal + ":127.0.0.1\"\n",
+			want: forgejo.AcquisitionConfig + "container:\n  docker_host: automount\n  network: host\n  options: \"--add-host=" + hostInternal + ":127.0.0.1\"\n",
 		},
 		{
 			name: "localhost: same shape (host networking still needed for container -> worker loopback)",
 			in:   forgejoTarget{host: "localhost", port: 3000},
-			want: "container:\n  docker_host: automount\n  network: host\n  options: \"--add-host=localhost:127.0.0.1\"\n",
+			want: forgejo.AcquisitionConfig + "container:\n  docker_host: automount\n  network: host\n  options: \"--add-host=localhost:127.0.0.1\"\n",
 		},
 		{
 			name: "IPv4 literal: minimal config with just docker_host (no host-override possible; documented limitation)",
 			in:   forgejoTarget{host: "192.0.2.10", port: 8080, isIPLit: true},
-			want: "container:\n  docker_host: automount\n",
+			want: forgejo.AcquisitionConfig + "container:\n  docker_host: automount\n",
 		},
 		{
 			name: "IPv6 literal: same minimal config",
 			in:   forgejoTarget{host: "2001:db8::1", port: 8443, isIPLit: true},
-			want: "container:\n  docker_host: automount\n",
+			want: forgejo.AcquisitionConfig + "container:\n  docker_host: automount\n",
 		},
 	}
 	for _, c := range cases {

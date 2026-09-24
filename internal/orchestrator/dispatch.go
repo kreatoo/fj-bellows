@@ -179,13 +179,11 @@ func (d *SSHDispatcher) RunJob(ctx context.Context, _, addr string, reg forgejo.
 		return fmt.Errorf("write runner config: %w", err)
 	}
 
-	cmd := fmt.Sprintf(
-		"forgejo-runner one-job --url %s --uuid %s --token-url file:/tmp/tok --label %s --handle %s --wait --config /tmp/runner-cfg.yml",
-		shellQuote(d.ForgejoURL),
-		shellQuote(reg.UUID),
-		shellQuote(strings.Join(d.Labels, ",")),
-		shellQuote(job.Handle),
-	)
+	args := forgejo.OneJobArgs(d.ForgejoURL, reg.UUID, d.Labels, job.Handle)
+	for i := range args {
+		args[i] = shellQuote(args[i])
+	}
+	cmd := "forgejo-runner " + strings.Join(args, " ")
 	if prep := hostsOverrideCommand(target); prep != "" {
 		cmd = prep + " && " + cmd
 	}
@@ -217,6 +215,7 @@ func (d *SSHDispatcher) RunJob(ctx context.Context, _, addr string, reg forgejo.
 //     documented limitation. See #37.
 func runnerConfigYAML(t forgejoTarget) string {
 	var sb strings.Builder
+	sb.WriteString(forgejo.AcquisitionConfig)
 	sb.WriteString("container:\n")
 	sb.WriteString("  docker_host: automount\n")
 	if !t.isIPLit {

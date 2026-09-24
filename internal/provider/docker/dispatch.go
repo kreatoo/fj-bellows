@@ -94,18 +94,18 @@ func (d *ExecDispatcher) RunJob(ctx context.Context, id, _ string, reg forgejo.R
 		return fmt.Errorf("write token: %w", err)
 	}
 
+	// Bound acquisition without imposing a deadline on the acquired job.
+	if _, err := d.runner.Run(ctx, strings.NewReader(forgejo.AcquisitionConfig),
+		"exec", "-i", id, "sh", "-c", "cat > /tmp/runner-cfg.yml && chmod 600 /tmp/runner-cfg.yml",
+	); err != nil {
+		return fmt.Errorf("write runner config: %w", err)
+	}
+
 	// (b) Run one-job. Arguments are passed as a literal argv so the worker's
 	// shell never sees them — no shell quoting required.
-	args := []string{
-		"exec", id,
-		"forgejo-runner", "one-job",
-		"--url", d.forgejoURL,
-		"--uuid", reg.UUID,
-		"--token-url", "file:/tmp/tok",
-		flagLabel, strings.Join(d.labels, ","),
-		"--handle", job.Handle,
-		"--wait",
-	}
+	args := append([]string{"exec", id, "forgejo-runner"},
+		forgejo.OneJobArgs(d.forgejoURL, reg.UUID, d.labels, job.Handle)...)
+
 	if _, err := d.runner.Run(ctx, nil, args...); err != nil {
 		// A cancelled ctx surfaces as ctx.Err() from execCLI.Run already.
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {

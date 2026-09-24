@@ -145,3 +145,29 @@ container:
 
 Dependencies are interfaces (`JobSource`, `Dispatcher`, `provider.Provider`);
 see [`mock`](mock) for the test doubles.
+
+## Bounded task acquisition
+
+Dispatch uses `forgejo-runner one-job` **without `--wait`**, with
+`runner.fetch_timeout: 2m` in the staged runner config. This applies to SSH,
+cache-gateway, and Docker dispatch. An empty or failed fetch exits with status
+2 and follows the existing dispatch-error cleanup path. A later reconcile can
+retry a job that is still queued. An empty response can return before two
+minutes; this is one bounded fetch, not a two-minute retry loop.
+
+This follows the pinned runner **v12.10.1** implementation:
+[`internal/app/poll/single.go`](https://code.forgejo.org/forgejo/runner/src/tag/v12.10.1/internal/app/poll/single.go)
+creates a timeout context only for `FetchSingleTask` / `FetchTask`, then runs
+an acquired task with a separate task context. `--wait` retries empty and failed
+fetches indefinitely, so setting `fetch_timeout` while retaining `--wait` does
+not bound acquisition. There is no acquisition-timeout CLI flag in this version.
+[`internal/app/cmd/cmd.go`](https://code.forgejo.org/forgejo/runner/src/tag/v12.10.1/internal/app/cmd/cmd.go)
+maps no-task errors to exit status 2.
+
+The two-minute bound covers the task-fetch RPC, not runner startup or readiness.
+It does **not** cap job execution. The runner's normal execution timeout and
+`poll.max_job_runtime` (default 6h) remain separate safety limits. Do not wrap
+the whole runner command in a short shell or context timeout: that would kill
+legitimate jobs. Host-key checks, token delivery over stdin, and transport
+configuration are unchanged. The acquisition bound is currently fixed, not a
+hot-reloadable operator setting.

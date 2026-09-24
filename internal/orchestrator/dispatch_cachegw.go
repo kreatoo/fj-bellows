@@ -108,7 +108,7 @@ func (d *CacheGatewayDispatcher) WaitReady(ctx context.Context, _, addr string) 
 }
 
 // RunJob delivers the one-shot Forgejo runner token to the worker via
-// stdin and runs `forgejo-runner one-job --wait`. Unlike the SSH-
+// stdin and runs `forgejo-runner one-job`. Unlike the SSH-
 // tunnel model there is no reverse port-forward and no /etc/hosts
 // rewrite: workers reach the Forgejo URL via the cache nanode's DNS
 // resolver + IPsec routing.
@@ -130,18 +130,16 @@ func (d *CacheGatewayDispatcher) RunJob(ctx context.Context, _, addr string, reg
 	// resolver) and reaches the Forgejo URL via the cache's DNS path.
 	if err := runRemote(ctx, client,
 		"cat > /tmp/runner-cfg.yml && chmod 600 /tmp/runner-cfg.yml",
-		strings.NewReader("container:\n  docker_host: automount\n"),
+		strings.NewReader(forgejo.AcquisitionConfig+"container:\n  docker_host: automount\n"),
 	); err != nil {
 		return fmt.Errorf("write runner config: %w", err)
 	}
 
-	cmd := fmt.Sprintf(
-		"forgejo-runner one-job --url %s --uuid %s --token-url file:/tmp/tok --label %s --handle %s --wait --config /tmp/runner-cfg.yml",
-		shellQuote(d.ForgejoURL),
-		shellQuote(reg.UUID),
-		shellQuote(strings.Join(d.Labels, ",")),
-		shellQuote(job.Handle),
-	)
+	args := forgejo.OneJobArgs(d.ForgejoURL, reg.UUID, d.Labels, job.Handle)
+	for i := range args {
+		args[i] = shellQuote(args[i])
+	}
+	cmd := "forgejo-runner " + strings.Join(args, " ")
 	if err := runRemote(ctx, client, cmd, nil); err != nil {
 		return fmt.Errorf("one-job: %w", err)
 	}
