@@ -200,25 +200,24 @@ func TestRunJobConfigWriteError(t *testing.T) {
 }
 
 // contextCheckingCLI verifies acquisition never adds a process-wide deadline.
-type contextCheckingCLI struct {
-	t      *testing.T
-	parent context.Context
-}
+type contextCheckingCLI func(context.Context) error
 
 func (c contextCheckingCLI) Run(ctx context.Context, _ io.Reader, _ ...string) ([]byte, error) {
-	c.t.Helper()
-	if ctx != c.parent {
-		c.t.Fatal("dispatch must preserve the caller context, not add an acquisition deadline")
-	}
-	if _, ok := ctx.Deadline(); ok {
-		c.t.Fatal("short deadline could kill an acquired job")
-	}
-	return nil, nil
+	return nil, c(ctx)
 }
 
 func TestRunJobDoesNotLimitExecutionToAcquisitionTimeout(t *testing.T) {
 	ctx := t.Context()
-	d := NewExecDispatcher(contextCheckingCLI{t: t, parent: ctx}, "docker", "u", nil, time.Second)
+	cli := contextCheckingCLI(func(got context.Context) error {
+		if got != ctx {
+			t.Fatal("dispatch must preserve the caller context, not add an acquisition deadline")
+		}
+		if _, ok := got.Deadline(); ok {
+			t.Fatal("short deadline could kill an acquired job")
+		}
+		return nil
+	})
+	d := NewExecDispatcher(cli, "docker", "u", nil, time.Second)
 	if err := d.RunJob(ctx, containerID, "", forgejo.Registration{}, forgejo.WaitingJob{}); err != nil {
 		t.Fatal(err)
 	}
